@@ -33,6 +33,10 @@ const seenClientResponses = new Set();
 const agentBuffers = new Map();
 const streamedItems = new Set();
 const fileChangePatches = new Map();
+let activeClient = null;
+let activeThreadId = null;
+let activeTurnId = null;
+let requestSeq = 10_000;
 let telegramOffset = 0;
 
 startTelegramPolling().catch((error) => {
@@ -49,6 +53,7 @@ server.on("upgrade", (req, socket, head) => {
   const client = acceptWebSocket(req, socket, head);
   const upstream = new WebSocket(CODEX_UPSTREAM_WS);
   upstreamByClient.set(client, upstream);
+  activeClient = client;
 
   console.log(`[bridge] client connected, upstream=${CODEX_UPSTREAM_WS}`);
 
@@ -86,8 +91,16 @@ function handleClientMessage(client, upstream, data) {
     return;
   }
 
+  trackClientRequest(msg);
   if (MIRROR_PROCESS_EVENTS) mirrorClientRequest(msg);
   sendUpstream(upstream, text);
+}
+
+function trackClientRequest(msg) {
+  if (!msg?.method) return;
+  if (msg.method === "turn/start" || msg.method === "turn/steer") {
+    activeThreadId = msg.params?.threadId || activeThreadId;
+  }
 }
 
 function mirrorClientRequest(msg) {
@@ -110,11 +123,30 @@ function handleUpstreamMessage(client, upstream, data) {
     } else if (msg.method === "serverRequest/resolved") {
       markResolved(client, msg.params?.requestId, "screen");
     } else {
+      trackServerNotification(msg);
       mirrorNotification(msg);
     }
   }
 
   client.sendText(text);
+}
+
+function trackServerNotification(msg) {
+  if (msg.method === "thread/started") {
+    activeThreadId = msg.params?.thread?.id || activeThreadId;
+    return;
+  }
+
+  if (msg.method === "turn/started") {
+    activeThreadId = msg.params?.threadId || activeThreadId;
+    activeTurnId = msg.params?.turn?.id || activeTurnId;
+    return;
+  }
+
+  if (msg.method === "turn/completed") {
+    activeThreadId = msg.params?.threadId || activeThreadId;
+    if (msg.params?.turn?.id === activeTurnId) activeTurnId = null;
+  }
 }
 
 function isApprovalRequest(msg) {
@@ -494,7 +526,7 @@ function flushTelegramBuffer(key) {
 }
 
 function sendTelegramText(text) {
-  telegram("sendMessage", {
+  return telegram("sendMessage", {
     chat_id: TELEGRAM_CHAT_ID,
     text,
     parse_mode: "HTML",
@@ -539,7 +571,55 @@ async function handleTelegramMessage(message) {
         "Approval requests will appear here with buttons.",
       ].join("\n"),
     });
+    return;
   }
+
+  if (!text) return;
+  await injectTelegramText(text);
+}
+
+async function injectTelegramText(text) {
+  if (!activeClient) {
+    await sendTelegramText("No active Codex CLI client is connected. Start it with: codex --remote ws://127.0.0.1:8766");
+    return;
+  }
+
+  if (!activeThreadId) {
+    await sendTelegramText("No active Codex thread yet. Send one prompt from the Codex CLI first, then Telegram messages can continue it.");
+    return;
+  }
+
+  const upstream = upstreamByClient.get(activeClient);
+  if (!upstream) {
+    await sendTelegramText("Codex upstream is not connected.");
+    return;
+  }
+
+  const input = [{ type: "text", text, text_elements: [] }];
+  const id = nextRequestId();
+  const request = activeTurnId
+    ? {
+        jsonrpc: "2.0",
+        id,
+        method: "turn/steer",
+        params: {
+          threadId: activeThreadId,
+          expectedTurnId: activeTurnId,
+          input,
+        },
+      }
+    : {
+        jsonrpc: "2.0",
+        id,
+        method: "turn/start",
+        params: {
+          threadId: activeThreadId,
+          input,
+        },
+      };
+
+  sendUpstream(upstream, JSON.stringify(request));
+  await sendTelegramText(`Sent to Codex: ${text}`);
 }
 
 async function telegram(method, payload, timeoutMs = 15_000) {
@@ -733,6 +813,10 @@ function closePair(client, upstream) {
     if (upstream.readyState === WebSocket.OPEN || upstream.readyState === WebSocket.CONNECTING) upstream.close();
   } catch {}
   upstreamByClient.delete(client);
+  if (activeClient === client) {
+    activeClient = null;
+    activeTurnId = null;
+  }
 }
 
 function encodeFrame(payload, masked, opcode = 0x1) {
@@ -790,6 +874,11 @@ function decodeFrame(buffer) {
 
 function requestKey(client, requestId) {
   return `${client.id}:${String(requestId)}`;
+}
+
+function nextRequestId() {
+  requestSeq += 1;
+  return `telegram-${requestSeq}`;
 }
 
 function shortApprovalToken(key) {
