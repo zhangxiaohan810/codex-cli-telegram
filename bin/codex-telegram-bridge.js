@@ -402,7 +402,6 @@ async function handleModelCallback(query, data) {
 
   currentModel = model.model;
   modelSelections.delete(token);
-  const applyResult = await applyThreadOverridesIfPossible();
 
   await telegram("editMessageText", {
     chat_id: query.message.chat?.id || TELEGRAM_CHAT_ID,
@@ -410,8 +409,7 @@ async function handleModelCallback(query, data) {
     text: [
       `Selected Codex model: ${model.displayName || model.model}`,
       "",
-      `Future turns through this bridge will use ${model.model}.`,
-      applyResult,
+      `The next new turn sent through this bridge will use ${model.model}.`,
     ].filter(Boolean).join("\n"),
     reply_markup: { inline_keyboard: [] },
   });
@@ -486,15 +484,13 @@ async function handleApprovalPolicyCallback(query, data) {
   }
 
   currentApprovalPolicy = policy;
-  const applyResult = await applyThreadOverridesIfPossible();
   await telegram("editMessageText", {
     chat_id: query.message.chat?.id || TELEGRAM_CHAT_ID,
     message_id: query.message.message_id,
     text: [
       `Selected approval policy: ${policy}`,
       "",
-      "Future turns through this bridge will use this policy.",
-      applyResult,
+      "The next new turn sent through this bridge will use this policy.",
     ].filter(Boolean).join("\n"),
     reply_markup: { inline_keyboard: [] },
   });
@@ -858,13 +854,16 @@ async function sendBridgeStatus() {
       "",
       `cli connected: ${Boolean(activeClient)}`,
       `thread: ${activeThreadId || "(none)"}`,
-      `thread status: ${thread?.status || "(unknown)"}`,
+      `thread status: ${formatThreadStatus(thread?.status) || "(unknown)"}`,
       `thread title: ${thread?.name || thread?.preview || "(none)"}`,
       `active turn: ${activeTurnId || "(none)"}`,
       `cwd: ${activeCwd || thread?.cwd || "(unknown)"}`,
       `config model: ${config?.model || "(default)"}`,
       `config reasoning: ${config?.model_reasoning_effort || "(default)"}`,
       `config approvals: ${formatApprovalPolicy(config?.approval_policy) || "(default)"}`,
+      `next turn model: ${currentModel || config?.model || "(default)"}`,
+      `next turn reasoning: ${currentEffort || config?.model_reasoning_effort || "(default)"}`,
+      `next turn approvals: ${formatApprovalPolicy(currentApprovalPolicy || config?.approval_policy) || "(default)"}`,
       `model override: ${currentModel || "(none)"}`,
       `reasoning effort override: ${currentEffort || "(none)"}`,
       `approval policy override: ${formatApprovalPolicy(currentApprovalPolicy) || "(none)"}`,
@@ -881,12 +880,10 @@ async function handleModelCommand(argument) {
   }
 
   currentModel = argument;
-  const applyResult = await applyThreadOverridesIfPossible();
   await sendTelegramText([
     `Selected Codex model: ${currentModel}`,
     "",
-    "Future turns through this bridge will use this model.",
-    applyResult,
+    "The next new turn sent through this bridge will use this model.",
   ].filter(Boolean).join("\n"));
 }
 
@@ -1105,12 +1102,10 @@ async function handleApprovalPolicyCommand(argument) {
   }
 
   currentApprovalPolicy = argument;
-  const applyResult = await applyThreadOverridesIfPossible();
   await sendTelegramText([
     `Selected approval policy: ${currentApprovalPolicy}`,
     "",
-    "Future turns through this bridge will use this policy.",
-    applyResult,
+    "The next new turn sent through this bridge will use this policy.",
   ].filter(Boolean).join("\n"));
 }
 
@@ -1172,23 +1167,6 @@ function sendBridgeRequest(upstream, method, params) {
     logRpc("bridge request", { id, method, params });
     sendUpstream(upstream, JSON.stringify(request));
   });
-}
-
-async function applyThreadOverridesIfPossible() {
-  const upstream = getActiveUpstream();
-  if (!upstream || !activeThreadId || activeTurnId) return "";
-
-  const response = await sendBridgeRequest(upstream, "thread/resume", withThreadOverrides({
-    threadId: activeThreadId,
-    excludeTurns: true,
-    persistExtendedHistory: false,
-  }));
-  if (response.error) {
-    return `Thread update failed: ${response.error.message || JSON.stringify(response.error)}`;
-  }
-
-  updateRuntimeFromThreadResponse(response.result || {});
-  return "Applied to the active app-server thread.";
 }
 
 function updateRuntimeFromThreadResponse(result) {
@@ -1265,6 +1243,16 @@ function formatThreadButton(thread) {
   const title = thread.name || thread.preview || thread.id;
   const date = thread.updatedAt ? new Date(thread.updatedAt * 1000).toISOString().slice(0, 10) : "";
   return truncateSingleLine(`${date} ${title}`, 58);
+}
+
+function formatThreadStatus(status) {
+  if (!status) return "";
+  if (typeof status === "string") return status;
+  if (status.type === "active") {
+    const flags = Array.isArray(status.activeFlags) ? status.activeFlags.join(", ") : "";
+    return flags ? `active (${flags})` : "active";
+  }
+  return status.type || JSON.stringify(status);
 }
 
 function formatApprovalPolicy(policy) {
