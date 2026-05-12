@@ -17,7 +17,8 @@ const CODEX_UPSTREAM_WS = env.CODEX_UPSTREAM_WS || "ws://127.0.0.1:8765";
 const BRIDGE_HOST = env.BRIDGE_HOST || "127.0.0.1";
 const BRIDGE_PORT = Number(env.BRIDGE_PORT || 8766);
 const MIRROR_AGENT_MESSAGES = env.MIRROR_AGENT_MESSAGES !== "0";
-const MIRROR_PROCESS_EVENTS = env.MIRROR_PROCESS_EVENTS !== "0";
+const MIRROR_PROCESS_EVENTS = env.MIRROR_PROCESS_EVENTS === "1";
+const INCLUDE_APPROVAL_PARAMS = env.INCLUDE_APPROVAL_PARAMS === "1";
 const TELEGRAM_PROXY = env.TELEGRAM_PROXY || env.HTTPS_PROXY || env.HTTP_PROXY || "";
 const TELEGRAM_MESSAGE_LIMIT = 3500;
 const TELEGRAM_CODE_LIMIT = 2500;
@@ -83,7 +84,7 @@ function handleClientMessage(client, upstream, data) {
     return;
   }
 
-  mirrorClientRequest(msg);
+  if (MIRROR_PROCESS_EVENTS) mirrorClientRequest(msg);
   sendUpstream(upstream, text);
 }
 
@@ -179,7 +180,7 @@ async function sendApprovalToTelegram(record) {
 
 function formatApproval(record) {
   const p = record.params;
-  const details = formatRequestDetails(record);
+  const details = INCLUDE_APPROVAL_PARAMS ? formatRequestDetails(record) : "";
   if (record.method === "item/commandExecution/requestApproval") {
     return html([
       "<b>Codex command approval</b>",
@@ -332,51 +333,49 @@ async function editTelegramApproval(message, suffix) {
 }
 
 function mirrorNotification(msg) {
-  if (!MIRROR_AGENT_MESSAGES && !MIRROR_PROCESS_EVENTS) return;
+  if (!MIRROR_AGENT_MESSAGES) return;
 
   if (msg.method === "agent/message/delta" || msg.method === "item/agent/messageDelta") {
-    if (!MIRROR_AGENT_MESSAGES) return;
     bufferTelegram(`agent:${msg.params?.threadId || "default"}`, "assistant", msg.params?.delta || "");
     return;
   }
 
   if (msg.method === "item/reasoning/summaryTextDelta") {
-    if (!MIRROR_AGENT_MESSAGES) return;
     bufferTelegram(`reasoning:${msg.params?.itemId || "default"}`, "reasoning", msg.params?.delta || "");
     return;
   }
 
   if (msg.method === "turn/completed") {
     flushAllTelegramBuffers();
-    if (MIRROR_PROCESS_EVENTS) sendTelegramText(formatEventMessage("turn completed", msg.params));
-    return;
-  }
-
-  if (msg.method === "turn/started") {
-    if (MIRROR_PROCESS_EVENTS) sendTelegramText(formatEventMessage("turn started", msg.params));
-    return;
-  }
-
-  if (msg.method === "item/started") {
-    if (MIRROR_PROCESS_EVENTS) sendTelegramText(formatItemEvent("item started", msg.params));
     return;
   }
 
   if (msg.method === "item/completed") {
     flushAllTelegramBuffers();
-    if (MIRROR_PROCESS_EVENTS) sendTelegramText(formatItemEvent("item completed", msg.params));
+    return;
+  }
+
+  if (MIRROR_PROCESS_EVENTS) mirrorProcessNotification(msg);
+}
+
+function mirrorProcessNotification(msg) {
+  if (msg.method === "turn/started") {
+    sendTelegramText(formatEventMessage("turn started", msg.params));
+    return;
+  }
+
+  if (msg.method === "item/started") {
+    sendTelegramText(formatItemEvent("item started", msg.params));
     return;
   }
 
   if (msg.method === "item/commandExecution/outputDelta") {
-    if (!MIRROR_PROCESS_EVENTS) return;
-    const delta = msg.params?.delta;
-    bufferTelegram(`cmd:${msg.params?.itemId || "default"}`, "cmd output", delta || "");
+    bufferTelegram(`cmd:${msg.params?.itemId || "default"}`, "cmd output", msg.params?.delta || "");
     return;
   }
 
   if (msg.method === "item/commandExecution/terminalInteraction") {
-    if (MIRROR_PROCESS_EVENTS) sendTelegramText(formatEventMessage("terminal interaction", msg.params));
+    sendTelegramText(formatEventMessage("terminal interaction", msg.params));
   }
 }
 
