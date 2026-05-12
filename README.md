@@ -40,6 +40,8 @@ Edit `.env`:
 ```bash
 TELEGRAM_BOT_TOKEN=your_botfather_token
 TELEGRAM_CHAT_ID=your_numeric_chat_id
+# Optional on macOS if `codex` is not in PATH:
+# CODEX_BIN=/Applications/Codex.app/Contents/Resources/codex
 CODEX_UPSTREAM_WS=ws://127.0.0.1:8765
 BRIDGE_HOST=127.0.0.1
 BRIDGE_PORT=8766
@@ -59,6 +61,23 @@ https://api.telegram.org/bot<YOUR_TOKEN>/getUpdates
 Look for `message.chat.id`.
 
 ## Run
+
+Recommended one-command startup:
+
+```bash
+cd /path/to/codex-cli-telegram
+codex-telegram
+```
+
+This starts `codex app-server` and `codex-telegram-bridge` in the background if they are not already listening, then opens:
+
+```bash
+codex --remote ws://127.0.0.1:8766
+```
+
+Logs are written under `.logs/`.
+
+Manual startup is still available:
 
 Terminal 1:
 

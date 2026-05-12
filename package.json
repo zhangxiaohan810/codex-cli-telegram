@@ -4,11 +4,12 @@
   "private": true,
   "type": "module",
   "bin": {
+    "codex-telegram": "./bin/codex-telegram.js",
     "codex-telegram-bridge": "./bin/codex-telegram-bridge.js"
   },
   "scripts": {
     "start": "node ./bin/codex-telegram-bridge.js",
-    "check": "node --check ./bin/codex-telegram-bridge.js"
+    "check": "node --check ./bin/codex-telegram-bridge.js && node --check ./bin/codex-telegram.js"
   },
   "engines": {
     "node": ">=22"
