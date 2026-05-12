@@ -1,0 +1,16 @@
+{
+  "name": "codex-telegram-app-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "codex-telegram-bridge": "./bin/codex-telegram-bridge.js"
+  },
+  "scripts": {
+    "start": "node ./bin/codex-telegram-bridge.js",
+    "check": "node --check ./bin/codex-telegram-bridge.js"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}
