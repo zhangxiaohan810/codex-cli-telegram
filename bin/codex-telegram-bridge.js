@@ -39,6 +39,10 @@ let activeTurnId = null;
 let requestSeq = 10_000;
 let telegramOffset = 0;
 
+setupTelegramCommands().catch((error) => {
+  console.error("[telegram] failed to set command menu:", error.message);
+});
+
 startTelegramPolling().catch((error) => {
   console.error("[telegram] polling stopped:", error);
 });
@@ -534,6 +538,26 @@ function sendTelegramText(text) {
   }).catch((error) => console.error("[telegram] mirror failed:", error.message));
 }
 
+async function setupTelegramCommands() {
+  await telegram("setMyCommands", {
+    commands: [
+      { command: "start", description: "Show bridge help" },
+      { command: "bridge_help", description: "Show bridge help" },
+      { command: "bridge_status", description: "Show bridge connection status" },
+      { command: "model", description: "Codex: change or show model" },
+      { command: "approvals", description: "Codex: change approval mode" },
+      { command: "status", description: "Codex: show session status" },
+      { command: "diff", description: "Codex: show current diff" },
+      { command: "review", description: "Codex: start review mode" },
+      { command: "compact", description: "Codex: compact context" },
+      { command: "new", description: "Codex: start new thread if supported" },
+      { command: "resume", description: "Codex: resume thread if supported" },
+    ],
+    scope: { type: "chat", chat_id: TELEGRAM_CHAT_ID },
+  });
+  console.log("[telegram] command menu configured");
+}
+
 async function startTelegramPolling() {
   console.log("[telegram] polling started");
   for (;;) {
@@ -560,22 +584,56 @@ async function startTelegramPolling() {
 }
 
 async function handleTelegramMessage(message) {
-  const text = (message.text || "").trim();
-  if (text === "/start" || text === "/help") {
-    await telegram("sendMessage", {
-      chat_id: TELEGRAM_CHAT_ID,
-      text: [
-        "Codex bridge is online.",
-        "",
-        "Use your screen Codex client normally.",
-        "Approval requests will appear here with buttons.",
-      ].join("\n"),
-    });
+  const text = normalizeTelegramCommand(message.text || "").trim();
+  if (text === "/start" || text === "/help" || text === "/bridge_help") {
+    await sendBridgeHelp();
+    return;
+  }
+
+  if (text === "/bridge_status") {
+    await sendBridgeStatus();
     return;
   }
 
   if (!text) return;
   await injectTelegramText(text);
+}
+
+function normalizeTelegramCommand(text) {
+  return text.replace(/^\/([A-Za-z0-9_]+)@[A-Za-z0-9_]+(\s|$)/, "/$1$2");
+}
+
+async function sendBridgeHelp() {
+  await telegram("sendMessage", {
+    chat_id: TELEGRAM_CHAT_ID,
+    text: [
+      "Codex bridge is online.",
+      "",
+      "Type normal text to send it to Codex.",
+      "Type / to open Telegram command suggestions.",
+      "",
+      "Bridge commands:",
+      "/bridge_help - show this help",
+      "/bridge_status - show bridge status",
+      "",
+      "Codex commands such as /model, /approvals, /status, /diff, /review and /compact are forwarded to Codex.",
+    ].join("\n"),
+  });
+}
+
+async function sendBridgeStatus() {
+  await telegram("sendMessage", {
+    chat_id: TELEGRAM_CHAT_ID,
+    text: [
+      "Codex bridge status",
+      "",
+      `cli connected: ${Boolean(activeClient)}`,
+      `thread: ${activeThreadId || "(none)"}`,
+      `active turn: ${activeTurnId || "(none)"}`,
+      `upstream: ${CODEX_UPSTREAM_WS}`,
+      `bridge: ws://${BRIDGE_HOST}:${BRIDGE_PORT}`,
+    ].join("\n"),
+  });
 }
 
 async function injectTelegramText(text) {

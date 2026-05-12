@@ -8,6 +8,7 @@ This is a small local bridge for Codex app-server. It lets your normal Codex scr
 - Mirrors Codex approval requests to Telegram with inline buttons.
 - Lets Telegram answer command and file-change approvals with `accept`, `acceptForSession`, `decline`, or `cancel`.
 - Mirrors assistant text deltas to Telegram in small batches.
+- Registers Telegram slash-command suggestions. Bridge commands stay local; Codex slash commands are forwarded to Codex.
 
 This bridge uses Codex's local app-server JSON-RPC protocol. It does not scrape terminal text or simulate keyboard input.
 
@@ -166,6 +167,19 @@ systemctl --user enable --now codex-app-server codex-telegram-bridge
 - `Session`: approve for the current session when Codex supports it.
 - `Decline`: reject and let the agent continue.
 - `Cancel`: reject and interrupt the turn.
+
+## Telegram Commands
+
+Typing `/` in the Telegram chat shows a command menu.
+
+Bridge-local commands:
+
+```text
+/bridge_help
+/bridge_status
+```
+
+Codex commands such as `/model`, `/approvals`, `/status`, `/diff`, `/review`, and `/compact` are forwarded to the connected Codex CLI session.
 
 ## Notes
 
