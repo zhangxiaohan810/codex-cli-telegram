@@ -2,6 +2,8 @@
 
 This is a small local bridge for Codex app-server. It lets your normal Codex screen client and Telegram approve the same Codex permission prompt. Whichever side answers first wins; duplicate approval responses are ignored by the bridge.
 
+Chinese installation guide: [INSTALL_CN.md](./INSTALL_CN.md)
+
 ## What It Does
 
 - Proxies `codex --remote` traffic to a real `codex app-server`.
@@ -51,6 +53,8 @@ MIRROR_PROCESS_EVENTS=0
 INCLUDE_APPROVAL_PARAMS=0
 # Optional: log bridge JSON-RPC requests/responses while debugging commands:
 BRIDGE_DEBUG_RPC=0
+# Optional: retry transient Telegram API network failures such as ECONNRESET:
+TELEGRAM_RETRIES=2
 # If Telegram is blocked on your network, use your local proxy:
 TELEGRAM_PROXY=http://127.0.0.1:8888
 ```
@@ -202,5 +206,7 @@ For debugging command routing, set `BRIDGE_DEBUG_RPC=1` in `.env` and restart `c
 ## Notes
 
 - Keep both WebSocket listeners on `127.0.0.1` unless you have a separate authenticated tunnel.
+- The bridge accepts only one `codex --remote` client at a time. Extra CLI windows are rejected so Telegram input cannot be routed to the wrong session.
+- A Telegram bot token can only be polled by one bridge process at a time. If logs show `getUpdates: Conflict`, stop the other bridge or use a separate bot token for that machine.
 - The bridge only accepts callback clicks from `TELEGRAM_CHAT_ID`.
 - `item/permissions/requestApproval` is mirrored for visibility, but the first version does not synthesize a permission profile response from Telegram because that response shape is more complex than command/file-change approvals. Approve those on screen.

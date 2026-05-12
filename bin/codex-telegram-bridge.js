@@ -23,8 +23,10 @@ const BRIDGE_DEBUG_RPC = env.BRIDGE_DEBUG_RPC === "1";
 const TELEGRAM_PROXY = env.TELEGRAM_PROXY || env.HTTPS_PROXY || env.HTTP_PROXY || "";
 const TELEGRAM_MESSAGE_LIMIT = 3500;
 const TELEGRAM_CODE_LIMIT = 2500;
+const TELEGRAM_RETRIES = Number(env.TELEGRAM_RETRIES || 2);
 const REASONING_EFFORTS = ["none", "minimal", "low", "medium", "high", "xhigh"];
 const APPROVAL_POLICIES = ["untrusted", "on-failure", "on-request", "never"];
+const WS_CLOSE_POLICY_VIOLATION = 1008;
 
 if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) {
   fatal("TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID are required. Copy .env.example to .env first.");
@@ -65,11 +67,18 @@ server.on("upgrade", (req, socket, head) => {
   }
 
   const client = acceptWebSocket(req, socket, head);
+  if (activeClient?.open) {
+    console.warn(`[bridge] rejected extra client ${client.id}; active client=${activeClient.id}`);
+    client.sendClose(WS_CLOSE_POLICY_VIOLATION, "codex-telegram-bridge already has an active Codex CLI client");
+    sendTelegramText(`Rejected extra Codex CLI connection. Active client is ${activeClient.id}. Close the old codex --remote window before opening another.`).catch(() => {});
+    return;
+  }
+
   const upstream = new WebSocket(CODEX_UPSTREAM_WS);
   upstreamByClient.set(client, upstream);
   activeClient = client;
 
-  console.log(`[bridge] client connected, upstream=${CODEX_UPSTREAM_WS}`);
+  console.log(`[bridge] client connected id=${client.id}, upstream=${CODEX_UPSTREAM_WS}`);
 
   client.onMessage = (data) => handleClientMessage(client, upstream, data);
   upstream.addEventListener("message", (event) => handleUpstreamMessage(client, upstream, event.data));
@@ -853,6 +862,7 @@ async function sendBridgeStatus() {
       "Codex status",
       "",
       `cli connected: ${Boolean(activeClient)}`,
+      `client id: ${activeClient?.id || "(none)"}`,
       `thread: ${activeThreadId || "(none)"}`,
       `thread status: ${formatThreadStatus(thread?.status) || "(unknown)"}`,
       `thread title: ${thread?.name || thread?.preview || "(none)"}`,
@@ -1262,13 +1272,27 @@ function formatApprovalPolicy(policy) {
 
 async function telegram(method, payload, timeoutMs = 15_000) {
   const url = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/${method}`;
-  const json = TELEGRAM_PROXY
-    ? await postJsonViaHttpProxy(url, payload, TELEGRAM_PROXY, timeoutMs)
-    : await postJsonDirect(url, payload, timeoutMs);
-  if (!json.ok) {
-    throw new Error(`${method}: ${json.description || "request failed"}`);
+  let lastError = null;
+
+  for (let attempt = 0; attempt <= TELEGRAM_RETRIES; attempt += 1) {
+    try {
+      const json = TELEGRAM_PROXY
+        ? await postJsonViaHttpProxy(url, payload, TELEGRAM_PROXY, timeoutMs)
+        : await postJsonDirect(url, payload, timeoutMs);
+      if (!json.ok) {
+        throw new Error(`${method}: ${json.description || "request failed"}`);
+      }
+      return json.result;
+    } catch (error) {
+      lastError = error;
+      if (attempt >= TELEGRAM_RETRIES || !isRetryableTelegramError(error)) break;
+      const delay = 500 * (attempt + 1);
+      console.warn(`[telegram] ${method} failed (${describeError(error)}), retrying in ${delay}ms`);
+      await sleep(delay);
+    }
   }
-  return json.result;
+
+  throw lastError;
 }
 
 function postJsonDirect(url, payload, timeoutMs) {
@@ -1397,6 +1421,15 @@ function acceptWebSocket(req, socket, head) {
       if (!this.open) return;
       socket.write(encodeFrame(Buffer.from(text), false));
     },
+    sendClose(code = 1000, reason = "") {
+      if (!this.open) return;
+      this.open = false;
+      const reasonBuffer = Buffer.from(reason);
+      const payload = Buffer.alloc(2 + reasonBuffer.length);
+      payload.writeUInt16BE(code, 0);
+      reasonBuffer.copy(payload, 2);
+      socket.write(encodeFrame(payload, false, 0x8), () => socket.end());
+    },
     flushQueue() {
       const upstream = upstreamByClient.get(this);
       if (!upstream || upstream.readyState !== WebSocket.OPEN) return;
@@ -1452,8 +1485,11 @@ function closePair(client, upstream) {
   } catch {}
   upstreamByClient.delete(client);
   if (activeClient === client) {
+    console.log(`[bridge] active client disconnected id=${client.id}`);
     activeClient = null;
+    activeThreadId = null;
     activeTurnId = null;
+    activeCwd = null;
   }
 }
 
@@ -1564,6 +1600,19 @@ function describeError(error) {
   } catch {
     return String(error);
   }
+}
+
+function isRetryableTelegramError(error) {
+  const message = describeError(error);
+  return [
+    "ECONNRESET",
+    "ETIMEDOUT",
+    "ECONNREFUSED",
+    "EAI_AGAIN",
+    "socket hang up",
+    "request timeout",
+    "proxy timeout",
+  ].some((pattern) => message.includes(pattern));
 }
 
 function summarizeRpcResult(result) {
