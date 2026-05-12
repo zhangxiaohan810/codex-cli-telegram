@@ -88,6 +88,9 @@ function handleUpstreamMessage(client, upstream, data) {
   const msg = parseJson(text);
 
   if (msg) {
+    if (msg.id !== undefined && msg.method) {
+      console.log(`[bridge] server request method=${msg.method} id=${msg.id}`);
+    }
     if (isApprovalRequest(msg)) {
       registerApproval(client, upstream, msg);
     } else if (msg.method === "serverRequest/resolved") {
@@ -105,6 +108,8 @@ function isApprovalRequest(msg) {
     "item/commandExecution/requestApproval",
     "item/fileChange/requestApproval",
     "item/permissions/requestApproval",
+    "execCommandApproval",
+    "applyPatchApproval",
   ].includes(msg.method);
 }
 
@@ -124,6 +129,7 @@ function registerApproval(client, upstream, msg) {
   };
 
   pendingApprovals.set(key, record);
+  console.log(`[bridge] approval request method=${msg.method} id=${msg.id}`);
   sendApprovalToTelegram(record).catch((error) => {
     console.error("[telegram] failed to send approval:", error.message);
   });
@@ -173,6 +179,17 @@ function formatApproval(record) {
     ].filter(Boolean).join("\n"));
   }
 
+  if (record.method === "execCommandApproval") {
+    const command = Array.isArray(p.command) ? p.command.join(" ") : String(p.command || "(command unavailable)");
+    return html([
+      "<b>Codex command approval</b>",
+      "",
+      `cwd: <code>${p.cwd || ""}</code>`,
+      `cmd: <code>${command}</code>`,
+      p.reason ? `reason: ${p.reason}` : "",
+    ].filter(Boolean).join("\n"));
+  }
+
   if (record.method === "item/fileChange/requestApproval") {
     return html([
       "<b>Codex file-change approval</b>",
@@ -181,6 +198,16 @@ function formatApproval(record) {
       `turn: <code>${p.turnId || ""}</code>`,
       `item: <code>${p.itemId || ""}</code>`,
     ].join("\n"));
+  }
+
+  if (record.method === "applyPatchApproval") {
+    const files = Object.keys(p.fileChanges || {});
+    return html([
+      "<b>Codex patch approval</b>",
+      "",
+      files.length ? `files: <code>${files.join(", ")}</code>` : "files: <code>(unknown)</code>",
+      p.reason ? `reason: ${p.reason}` : "",
+    ].filter(Boolean).join("\n"));
   }
 
   return html([
@@ -214,12 +241,24 @@ async function handleTelegramCallback(query) {
   const response = {
     jsonrpc: "2.0",
     id: record.requestId,
-    result: { decision },
+    result: { decision: mapDecisionForMethod(record.method, decision) },
   };
 
   sendUpstream(record.upstream, JSON.stringify(response));
   markResolved(record.client, record.requestId, `telegram:${decision}`);
   await editTelegramApproval(query.message, `Resolved from Telegram: ${decision}`);
+}
+
+function mapDecisionForMethod(method, decision) {
+  if (method === "execCommandApproval" || method === "applyPatchApproval") {
+    return {
+      accept: "approved",
+      acceptForSession: "approved_for_session",
+      decline: "denied",
+      cancel: "abort",
+    }[decision] || "denied";
+  }
+  return decision;
 }
 
 function markResolved(client, requestId, source) {
