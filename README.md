@@ -49,6 +49,8 @@ BRIDGE_PORT=8766
 MIRROR_AGENT_MESSAGES=1
 MIRROR_PROCESS_EVENTS=0
 INCLUDE_APPROVAL_PARAMS=0
+# Optional: log bridge JSON-RPC requests/responses while debugging commands:
+BRIDGE_DEBUG_RPC=0
 # If Telegram is blocked on your network, use your local proxy:
 TELEGRAM_PROXY=http://127.0.0.1:8888
 ```
@@ -194,6 +196,8 @@ Supported Codex commands:
 ```
 
 Unsupported slash commands are rejected by the bridge instead of being sent as normal prompts.
+
+For debugging command routing, set `BRIDGE_DEBUG_RPC=1` in `.env` and restart `codex-telegram-bridge`.
 
 ## Notes
 

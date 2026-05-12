@@ -19,6 +19,7 @@ const BRIDGE_PORT = Number(env.BRIDGE_PORT || 8766);
 const MIRROR_AGENT_MESSAGES = env.MIRROR_AGENT_MESSAGES !== "0";
 const MIRROR_PROCESS_EVENTS = env.MIRROR_PROCESS_EVENTS === "1";
 const INCLUDE_APPROVAL_PARAMS = env.INCLUDE_APPROVAL_PARAMS === "1";
+const BRIDGE_DEBUG_RPC = env.BRIDGE_DEBUG_RPC === "1";
 const TELEGRAM_PROXY = env.TELEGRAM_PROXY || env.HTTPS_PROXY || env.HTTP_PROXY || "";
 const TELEGRAM_MESSAGE_LIMIT = 3500;
 const TELEGRAM_CODE_LIMIT = 2500;
@@ -84,7 +85,7 @@ server.on("upgrade", (req, socket, head) => {
   });
   upstream.addEventListener("close", () => closePair(client, upstream));
   upstream.addEventListener("error", (error) => {
-    console.error("[bridge] upstream error:", error.message);
+    console.error("[bridge] upstream error:", describeError(error));
     closePair(client, upstream);
   });
 });
@@ -164,6 +165,7 @@ function handleBridgeResponse(msg) {
   if (!msg?.id || !pendingBridgeRequests.has(msg.id)) return false;
   const request = pendingBridgeRequests.get(msg.id);
   pendingBridgeRequests.delete(msg.id);
+  logRpc("bridge response", { id: msg.id, method: request.method, error: msg.error, result: summarizeRpcResult(msg.result) });
   request.resolve(msg);
   return true;
 }
@@ -400,11 +402,17 @@ async function handleModelCallback(query, data) {
 
   currentModel = model.model;
   modelSelections.delete(token);
+  const applyResult = await applyThreadOverridesIfPossible();
 
   await telegram("editMessageText", {
     chat_id: query.message.chat?.id || TELEGRAM_CHAT_ID,
     message_id: query.message.message_id,
-    text: `Selected Codex model: ${model.displayName || model.model}\n\nFuture turns through this bridge will use ${model.model}.`,
+    text: [
+      `Selected Codex model: ${model.displayName || model.model}`,
+      "",
+      `Future turns through this bridge will use ${model.model}.`,
+      applyResult,
+    ].filter(Boolean).join("\n"),
     reply_markup: { inline_keyboard: [] },
   });
 }
@@ -433,12 +441,9 @@ async function handleResumeCallback(query, data) {
     return;
   }
 
-  const result = response.result || {};
-  activeThreadId = result.thread?.id || thread.id;
-  activeCwd = result.cwd || result.thread?.cwd || thread.cwd || activeCwd;
-  currentModel = result.model || currentModel;
-  currentEffort = result.reasoningEffort || currentEffort;
-  currentApprovalPolicy = result.approvalPolicy || currentApprovalPolicy;
+  updateRuntimeFromThreadResponse(response.result || {});
+  activeThreadId = activeThreadId || thread.id;
+  activeCwd = activeCwd || thread.cwd;
   resumeSelections.delete(token);
 
   await telegram("editMessageText", {
@@ -450,6 +455,8 @@ async function handleResumeCallback(query, data) {
       `thread: ${activeThreadId}`,
       `cwd: ${activeCwd || "(unknown)"}`,
       `model: ${currentModel || "(server default)"}`,
+      "",
+      "Telegram messages will continue this thread. The screen CLI may keep its own current view until it receives new server events.",
     ].join("\n"),
     reply_markup: { inline_keyboard: [] },
   });
@@ -479,10 +486,16 @@ async function handleApprovalPolicyCallback(query, data) {
   }
 
   currentApprovalPolicy = policy;
+  const applyResult = await applyThreadOverridesIfPossible();
   await telegram("editMessageText", {
     chat_id: query.message.chat?.id || TELEGRAM_CHAT_ID,
     message_id: query.message.message_id,
-    text: `Selected approval policy: ${policy}\n\nFuture turns through this bridge will use this policy.`,
+    text: [
+      `Selected approval policy: ${policy}`,
+      "",
+      "Future turns through this bridge will use this policy.",
+      applyResult,
+    ].filter(Boolean).join("\n"),
     reply_markup: { inline_keyboard: [] },
   });
 }
@@ -763,7 +776,7 @@ async function handleSlashCommand(text) {
       await sendBridgeStatus();
       return;
     case "/model":
-      await sendModelPicker();
+      await handleModelCommand(argument);
       return;
     case "/resume":
       await sendResumePicker();
@@ -778,16 +791,16 @@ async function handleSlashCommand(text) {
       await sendCurrentDiff();
       return;
     case "/reasoning":
-      await sendReasoningPicker();
+      await handleReasoningCommand(argument);
       return;
     case "/approvals":
-      await sendApprovalPolicyPicker();
+      await handleApprovalPolicyCommand(argument);
       return;
     case "/review":
       await startReview(argument);
       return;
     case "/new":
-      await sendTelegramText("/new is not implemented in the Telegram bridge yet. Start a new thread from the screen CLI, then Telegram can continue it.");
+      await startNewThread(argument);
       return;
     default:
       await sendTelegramText(`${command} is not implemented in the Telegram bridge yet. It was not sent as a normal Codex prompt.`);
@@ -818,22 +831,63 @@ async function sendBridgeHelp() {
 }
 
 async function sendBridgeStatus() {
+  const upstream = getActiveUpstream();
+  let thread = null;
+  let config = null;
+
+  if (upstream && activeThreadId) {
+    const threadResponse = await sendBridgeRequest(upstream, "thread/read", {
+      threadId: activeThreadId,
+      includeTurns: false,
+    });
+    if (!threadResponse.error) thread = threadResponse.result?.thread || null;
+  }
+
+  if (upstream) {
+    const configResponse = await sendBridgeRequest(upstream, "config/read", {
+      includeLayers: false,
+      ...(activeCwd ? { cwd: activeCwd } : {}),
+    });
+    if (!configResponse.error) config = configResponse.result?.config || null;
+  }
+
   await telegram("sendMessage", {
     chat_id: TELEGRAM_CHAT_ID,
     text: [
-      "Codex bridge status",
+      "Codex status",
       "",
       `cli connected: ${Boolean(activeClient)}`,
       `thread: ${activeThreadId || "(none)"}`,
+      `thread status: ${thread?.status || "(unknown)"}`,
+      `thread title: ${thread?.name || thread?.preview || "(none)"}`,
       `active turn: ${activeTurnId || "(none)"}`,
-      `cwd: ${activeCwd || "(unknown)"}`,
+      `cwd: ${activeCwd || thread?.cwd || "(unknown)"}`,
+      `config model: ${config?.model || "(default)"}`,
+      `config reasoning: ${config?.model_reasoning_effort || "(default)"}`,
+      `config approvals: ${formatApprovalPolicy(config?.approval_policy) || "(default)"}`,
       `model override: ${currentModel || "(none)"}`,
       `reasoning effort override: ${currentEffort || "(none)"}`,
-      `approval policy override: ${currentApprovalPolicy || "(none)"}`,
+      `approval policy override: ${formatApprovalPolicy(currentApprovalPolicy) || "(none)"}`,
       `upstream: ${CODEX_UPSTREAM_WS}`,
       `bridge: ws://${BRIDGE_HOST}:${BRIDGE_PORT}`,
     ].join("\n"),
   });
+}
+
+async function handleModelCommand(argument) {
+  if (!argument) {
+    await sendModelPicker();
+    return;
+  }
+
+  currentModel = argument;
+  const applyResult = await applyThreadOverridesIfPossible();
+  await sendTelegramText([
+    `Selected Codex model: ${currentModel}`,
+    "",
+    "Future turns through this bridge will use this model.",
+    applyResult,
+  ].filter(Boolean).join("\n"));
 }
 
 async function sendModelPicker() {
@@ -866,6 +920,37 @@ async function sendModelPicker() {
     text: currentModel ? `Current bridge model override: ${currentModel}` : "Choose a Codex model for future turns:",
     reply_markup: { inline_keyboard: buttons },
   });
+}
+
+async function startNewThread(argument) {
+  const upstream = getActiveUpstream();
+  if (!upstream) {
+    await sendTelegramText("Codex upstream is not connected. Start Codex with codex-telegram first.");
+    return;
+  }
+
+  const params = withThreadOverrides({
+    ...(activeCwd ? { cwd: activeCwd } : {}),
+    experimentalRawEvents: false,
+    persistExtendedHistory: false,
+  });
+  const response = await sendBridgeRequest(upstream, "thread/start", params);
+  if (response.error) {
+    await sendTelegramText(`Failed to start new thread: ${response.error.message || JSON.stringify(response.error)}`);
+    return;
+  }
+
+  updateRuntimeFromThreadResponse(response.result || {});
+  await sendTelegramText([
+    "Started a new Codex thread for Telegram.",
+    "",
+    `thread: ${activeThreadId || "(unknown)"}`,
+    `cwd: ${activeCwd || "(unknown)"}`,
+    `model: ${currentModel || "(server default)"}`,
+    argument ? "" : "Send normal Telegram text to start work in this thread.",
+  ].filter(Boolean).join("\n"));
+
+  if (argument) await injectTelegramText(argument);
 }
 
 async function sendResumePicker() {
@@ -985,6 +1070,20 @@ async function sendReasoningPicker() {
   });
 }
 
+async function handleReasoningCommand(argument) {
+  if (!argument) {
+    await sendReasoningPicker();
+    return;
+  }
+  if (!REASONING_EFFORTS.includes(argument)) {
+    await sendTelegramText(`Unknown reasoning effort: ${argument}\nUse one of: ${REASONING_EFFORTS.join(", ")}`);
+    return;
+  }
+
+  currentEffort = argument;
+  await sendTelegramText(`Selected reasoning effort: ${currentEffort}\n\nFuture turns through this bridge will use this effort.`);
+}
+
 async function sendApprovalPolicyPicker() {
   await telegram("sendMessage", {
     chat_id: TELEGRAM_CHAT_ID,
@@ -993,6 +1092,26 @@ async function sendApprovalPolicyPicker() {
       inline_keyboard: APPROVAL_POLICIES.map((policy) => [{ text: policy, callback_data: `ap:${policy}` }]),
     },
   });
+}
+
+async function handleApprovalPolicyCommand(argument) {
+  if (!argument) {
+    await sendApprovalPolicyPicker();
+    return;
+  }
+  if (!APPROVAL_POLICIES.includes(argument)) {
+    await sendTelegramText(`Unknown approval policy: ${argument}\nUse one of: ${APPROVAL_POLICIES.join(", ")}`);
+    return;
+  }
+
+  currentApprovalPolicy = argument;
+  const applyResult = await applyThreadOverridesIfPossible();
+  await sendTelegramText([
+    `Selected approval policy: ${currentApprovalPolicy}`,
+    "",
+    "Future turns through this bridge will use this policy.",
+    applyResult,
+  ].filter(Boolean).join("\n"));
 }
 
 async function startReview(argument) {
@@ -1019,7 +1138,13 @@ async function startReview(argument) {
     return;
   }
 
-  await sendTelegramText("Review request sent to Codex.");
+  activeTurnId = response.result?.turn?.id || activeTurnId;
+  await sendTelegramText([
+    "Review started in Codex.",
+    "",
+    `thread: ${response.result?.reviewThreadId || activeThreadId}`,
+    `turn: ${activeTurnId || "(unknown)"}`,
+  ].join("\n"));
 }
 
 function getActiveUpstream() {
@@ -1037,14 +1162,41 @@ function sendBridgeRequest(upstream, method, params) {
     }, 10_000);
 
     pendingBridgeRequests.set(id, {
+      method,
       resolve: (message) => {
         clearTimeout(timeout);
         resolveRequest(message);
       },
     });
 
+    logRpc("bridge request", { id, method, params });
     sendUpstream(upstream, JSON.stringify(request));
   });
+}
+
+async function applyThreadOverridesIfPossible() {
+  const upstream = getActiveUpstream();
+  if (!upstream || !activeThreadId || activeTurnId) return "";
+
+  const response = await sendBridgeRequest(upstream, "thread/resume", withThreadOverrides({
+    threadId: activeThreadId,
+    excludeTurns: true,
+    persistExtendedHistory: false,
+  }));
+  if (response.error) {
+    return `Thread update failed: ${response.error.message || JSON.stringify(response.error)}`;
+  }
+
+  updateRuntimeFromThreadResponse(response.result || {});
+  return "Applied to the active app-server thread.";
+}
+
+function updateRuntimeFromThreadResponse(result) {
+  activeThreadId = result.thread?.id || activeThreadId;
+  activeCwd = result.cwd || result.thread?.cwd || activeCwd;
+  currentModel = result.model || currentModel;
+  currentEffort = result.reasoningEffort || currentEffort;
+  currentApprovalPolicy = result.approvalPolicy || currentApprovalPolicy;
 }
 
 function withThreadOverrides(params) {
@@ -1113,6 +1265,11 @@ function formatThreadButton(thread) {
   const title = thread.name || thread.preview || thread.id;
   const date = thread.updatedAt ? new Date(thread.updatedAt * 1000).toISOString().slice(0, 10) : "";
   return truncateSingleLine(`${date} ${title}`, 58);
+}
+
+function formatApprovalPolicy(policy) {
+  if (!policy) return "";
+  return typeof policy === "string" ? policy : JSON.stringify(policy);
 }
 
 async function telegram(method, payload, timeoutMs = 15_000) {
@@ -1409,6 +1566,34 @@ function truncateSingleLine(text, size) {
   const normalized = String(text || "").replace(/\s+/g, " ").trim();
   if (normalized.length <= size) return normalized;
   return `${normalized.slice(0, size - 3)}...`;
+}
+
+function describeError(error) {
+  if (!error) return "(empty error)";
+  if (error.message) return error.message;
+  try {
+    return JSON.stringify(error);
+  } catch {
+    return String(error);
+  }
+}
+
+function summarizeRpcResult(result) {
+  if (!result || typeof result !== "object") return result;
+  if (Array.isArray(result)) return { length: result.length };
+  const summary = {};
+  for (const key of Object.keys(result).slice(0, 8)) {
+    const value = result[key];
+    if (Array.isArray(value)) summary[key] = `[${value.length} items]`;
+    else if (value && typeof value === "object") summary[key] = value.id ? `{id:${value.id}}` : "{object}";
+    else summary[key] = value;
+  }
+  return summary;
+}
+
+function logRpc(label, payload) {
+  if (!BRIDGE_DEBUG_RPC) return;
+  console.log(`[bridge] ${label}: ${JSON.stringify(payload)}`);
 }
 
 function sleep(ms) {
