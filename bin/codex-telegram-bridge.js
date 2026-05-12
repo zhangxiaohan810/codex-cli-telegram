@@ -22,6 +22,8 @@ const INCLUDE_APPROVAL_PARAMS = env.INCLUDE_APPROVAL_PARAMS === "1";
 const TELEGRAM_PROXY = env.TELEGRAM_PROXY || env.HTTPS_PROXY || env.HTTP_PROXY || "";
 const TELEGRAM_MESSAGE_LIMIT = 3500;
 const TELEGRAM_CODE_LIMIT = 2500;
+const REASONING_EFFORTS = ["none", "minimal", "low", "medium", "high", "xhigh"];
+const APPROVAL_POLICIES = ["untrusted", "on-failure", "on-request", "never"];
 
 if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) {
   fatal("TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID are required. Copy .env.example to .env first.");
@@ -29,13 +31,20 @@ if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) {
 
 const upstreamByClient = new Map();
 const pendingApprovals = new Map();
+const pendingBridgeRequests = new Map();
 const seenClientResponses = new Set();
 const agentBuffers = new Map();
 const streamedItems = new Set();
 const fileChangePatches = new Map();
+const modelSelections = new Map();
+const resumeSelections = new Map();
 let activeClient = null;
 let activeThreadId = null;
 let activeTurnId = null;
+let activeCwd = null;
+let currentModel = null;
+let currentEffort = null;
+let currentApprovalPolicy = null;
 let requestSeq = 10_000;
 let telegramOffset = 0;
 
@@ -87,12 +96,22 @@ server.listen(BRIDGE_PORT, BRIDGE_HOST, () => {
 });
 
 function handleClientMessage(client, upstream, data) {
-  const text = data.toString();
+  let text = data.toString();
   const msg = parseJson(text);
 
   if (msg?.id !== undefined && seenClientResponses.has(requestKey(client, msg.id))) {
     console.log(`[bridge] swallowed duplicate response id=${msg.id}`);
     return;
+  }
+
+  if (msg?.method === "turn/start") {
+    msg.params = withTurnOverrides(msg.params || {});
+    text = JSON.stringify(msg);
+  }
+
+  if (msg?.method === "thread/start" || msg?.method === "thread/resume") {
+    msg.params = withThreadOverrides(msg.params || {});
+    text = JSON.stringify(msg);
   }
 
   trackClientRequest(msg);
@@ -104,6 +123,10 @@ function trackClientRequest(msg) {
   if (!msg?.method) return;
   if (msg.method === "turn/start" || msg.method === "turn/steer") {
     activeThreadId = msg.params?.threadId || activeThreadId;
+    activeCwd = msg.params?.cwd || activeCwd;
+  }
+  if (msg.method === "thread/start" || msg.method === "thread/resume") {
+    activeCwd = msg.params?.cwd || activeCwd;
   }
 }
 
@@ -117,6 +140,8 @@ function mirrorClientRequest(msg) {
 function handleUpstreamMessage(client, upstream, data) {
   const text = data.toString();
   const msg = parseJson(text);
+
+  if (handleBridgeResponse(msg)) return;
 
   if (msg) {
     if (msg.id !== undefined && msg.method) {
@@ -135,15 +160,25 @@ function handleUpstreamMessage(client, upstream, data) {
   client.sendText(text);
 }
 
+function handleBridgeResponse(msg) {
+  if (!msg?.id || !pendingBridgeRequests.has(msg.id)) return false;
+  const request = pendingBridgeRequests.get(msg.id);
+  pendingBridgeRequests.delete(msg.id);
+  request.resolve(msg);
+  return true;
+}
+
 function trackServerNotification(msg) {
   if (msg.method === "thread/started") {
     activeThreadId = msg.params?.thread?.id || activeThreadId;
+    activeCwd = msg.params?.thread?.cwd || activeCwd;
     return;
   }
 
   if (msg.method === "turn/started") {
     activeThreadId = msg.params?.threadId || activeThreadId;
     activeTurnId = msg.params?.turn?.id || activeTurnId;
+    activeCwd = msg.params?.cwd || activeCwd;
     return;
   }
 
@@ -314,6 +349,26 @@ async function handleTelegramCallback(query) {
   if (String(query.from?.id) !== String(TELEGRAM_CHAT_ID)) return;
   if (data.startsWith("noop:")) return;
 
+  if (data.startsWith("m:")) {
+    await handleModelCallback(query, data);
+    return;
+  }
+
+  if (data.startsWith("r:")) {
+    await handleResumeCallback(query, data);
+    return;
+  }
+
+  if (data.startsWith("e:")) {
+    await handleEffortCallback(query, data);
+    return;
+  }
+
+  if (data.startsWith("ap:")) {
+    await handleApprovalPolicyCallback(query, data);
+    return;
+  }
+
   const parts = data.split(":");
   if (parts.length !== 3 || parts[0] !== "a") return;
 
@@ -333,6 +388,103 @@ async function handleTelegramCallback(query) {
   sendUpstream(record.upstream, JSON.stringify(response));
   markResolved(record.client, record.requestId, `telegram:${decision}`);
   await editTelegramApproval(query.message, `Resolved from Telegram: ${decision}`);
+}
+
+async function handleModelCallback(query, data) {
+  const token = data.slice(2);
+  const model = modelSelections.get(token);
+  if (!model) {
+    await editTelegramApproval(query.message, "Model selection expired.");
+    return;
+  }
+
+  currentModel = model.model;
+  modelSelections.delete(token);
+
+  await telegram("editMessageText", {
+    chat_id: query.message.chat?.id || TELEGRAM_CHAT_ID,
+    message_id: query.message.message_id,
+    text: `Selected Codex model: ${model.displayName || model.model}\n\nFuture turns through this bridge will use ${model.model}.`,
+    reply_markup: { inline_keyboard: [] },
+  });
+}
+
+async function handleResumeCallback(query, data) {
+  const token = data.slice(2);
+  const thread = resumeSelections.get(token);
+  if (!thread) {
+    await editTelegramApproval(query.message, "Thread selection expired.");
+    return;
+  }
+
+  const upstream = getActiveUpstream();
+  if (!upstream) {
+    await editTelegramApproval(query.message, "Codex upstream is not connected.");
+    return;
+  }
+
+  const response = await sendBridgeRequest(upstream, "thread/resume", withThreadOverrides({
+    threadId: thread.id,
+    excludeTurns: false,
+    persistExtendedHistory: false,
+  }));
+  if (response.error) {
+    await editTelegramApproval(query.message, `Resume failed: ${response.error.message || JSON.stringify(response.error)}`);
+    return;
+  }
+
+  const result = response.result || {};
+  activeThreadId = result.thread?.id || thread.id;
+  activeCwd = result.cwd || result.thread?.cwd || thread.cwd || activeCwd;
+  currentModel = result.model || currentModel;
+  currentEffort = result.reasoningEffort || currentEffort;
+  currentApprovalPolicy = result.approvalPolicy || currentApprovalPolicy;
+  resumeSelections.delete(token);
+
+  await telegram("editMessageText", {
+    chat_id: query.message.chat?.id || TELEGRAM_CHAT_ID,
+    message_id: query.message.message_id,
+    text: [
+      "Resumed Codex thread.",
+      "",
+      `thread: ${activeThreadId}`,
+      `cwd: ${activeCwd || "(unknown)"}`,
+      `model: ${currentModel || "(server default)"}`,
+    ].join("\n"),
+    reply_markup: { inline_keyboard: [] },
+  });
+}
+
+async function handleEffortCallback(query, data) {
+  const effort = data.slice(2);
+  if (!REASONING_EFFORTS.includes(effort)) {
+    await editTelegramApproval(query.message, "Unknown reasoning effort.");
+    return;
+  }
+
+  currentEffort = effort;
+  await telegram("editMessageText", {
+    chat_id: query.message.chat?.id || TELEGRAM_CHAT_ID,
+    message_id: query.message.message_id,
+    text: `Selected reasoning effort: ${effort}\n\nFuture turns through this bridge will use this effort.`,
+    reply_markup: { inline_keyboard: [] },
+  });
+}
+
+async function handleApprovalPolicyCallback(query, data) {
+  const policy = data.slice(3);
+  if (!APPROVAL_POLICIES.includes(policy)) {
+    await editTelegramApproval(query.message, "Unknown approval policy.");
+    return;
+  }
+
+  currentApprovalPolicy = policy;
+  await telegram("editMessageText", {
+    chat_id: query.message.chat?.id || TELEGRAM_CHAT_ID,
+    message_id: query.message.message_id,
+    text: `Selected approval policy: ${policy}\n\nFuture turns through this bridge will use this policy.`,
+    reply_markup: { inline_keyboard: [] },
+  });
 }
 
 function mapDecisionForMethod(method, decision) {
@@ -545,11 +697,13 @@ async function setupTelegramCommands() {
       { command: "bridge_help", description: "Show bridge help" },
       { command: "bridge_status", description: "Show bridge connection status" },
       { command: "model", description: "Codex: change or show model" },
+      { command: "reasoning", description: "Codex: change reasoning effort" },
       { command: "approvals", description: "Codex: change approval mode" },
       { command: "status", description: "Codex: show session status" },
       { command: "diff", description: "Codex: show current diff" },
       { command: "review", description: "Codex: start review mode" },
       { command: "compact", description: "Codex: compact context" },
+      { command: "stop", description: "Codex: interrupt active turn" },
       { command: "new", description: "Codex: start new thread if supported" },
       { command: "resume", description: "Codex: resume thread if supported" },
     ],
@@ -585,18 +739,59 @@ async function startTelegramPolling() {
 
 async function handleTelegramMessage(message) {
   const text = normalizeTelegramCommand(message.text || "").trim();
-  if (text === "/start" || text === "/help" || text === "/bridge_help") {
-    await sendBridgeHelp();
-    return;
-  }
-
-  if (text === "/bridge_status") {
-    await sendBridgeStatus();
+  if (text.startsWith("/")) {
+    await handleSlashCommand(text);
     return;
   }
 
   if (!text) return;
   await injectTelegramText(text);
+}
+
+async function handleSlashCommand(text) {
+  const [command, ...args] = text.split(/\s+/);
+  const argument = args.join(" ").trim();
+
+  switch (command) {
+    case "/start":
+    case "/help":
+    case "/bridge_help":
+      await sendBridgeHelp();
+      return;
+    case "/bridge_status":
+    case "/status":
+      await sendBridgeStatus();
+      return;
+    case "/model":
+      await sendModelPicker();
+      return;
+    case "/resume":
+      await sendResumePicker();
+      return;
+    case "/stop":
+      await stopActiveTurn();
+      return;
+    case "/compact":
+      await compactActiveThread();
+      return;
+    case "/diff":
+      await sendCurrentDiff();
+      return;
+    case "/reasoning":
+      await sendReasoningPicker();
+      return;
+    case "/approvals":
+      await sendApprovalPolicyPicker();
+      return;
+    case "/review":
+      await startReview(argument);
+      return;
+    case "/new":
+      await sendTelegramText("/new is not implemented in the Telegram bridge yet. Start a new thread from the screen CLI, then Telegram can continue it.");
+      return;
+    default:
+      await sendTelegramText(`${command} is not implemented in the Telegram bridge yet. It was not sent as a normal Codex prompt.`);
+  }
 }
 
 function normalizeTelegramCommand(text) {
@@ -616,7 +811,8 @@ async function sendBridgeHelp() {
       "/bridge_help - show this help",
       "/bridge_status - show bridge status",
       "",
-      "Codex commands such as /model, /approvals, /status, /diff, /review and /compact are forwarded to Codex.",
+      "Codex commands are handled by this bridge when supported: /model, /reasoning, /approvals, /status, /diff, /review, /compact, /stop and /resume.",
+      "Unsupported slash commands are not sent as normal prompts.",
     ].join("\n"),
   });
 }
@@ -630,10 +826,242 @@ async function sendBridgeStatus() {
       `cli connected: ${Boolean(activeClient)}`,
       `thread: ${activeThreadId || "(none)"}`,
       `active turn: ${activeTurnId || "(none)"}`,
+      `cwd: ${activeCwd || "(unknown)"}`,
+      `model override: ${currentModel || "(none)"}`,
+      `reasoning effort override: ${currentEffort || "(none)"}`,
+      `approval policy override: ${currentApprovalPolicy || "(none)"}`,
       `upstream: ${CODEX_UPSTREAM_WS}`,
       `bridge: ws://${BRIDGE_HOST}:${BRIDGE_PORT}`,
     ].join("\n"),
   });
+}
+
+async function sendModelPicker() {
+  const upstream = getActiveUpstream();
+  if (!upstream) {
+    await sendTelegramText("Codex upstream is not connected. Start Codex with codex-telegram first.");
+    return;
+  }
+
+  const response = await sendBridgeRequest(upstream, "model/list", { includeHidden: false, limit: 30 });
+  if (response.error) {
+    await sendTelegramText(`Failed to load models: ${response.error.message || JSON.stringify(response.error)}`);
+    return;
+  }
+
+  const models = response.result?.data || [];
+  if (!models.length) {
+    await sendTelegramText("No Codex models returned by app-server.");
+    return;
+  }
+
+  const buttons = models.slice(0, 20).map((model) => {
+    const token = shortApprovalToken(`${model.model}:${Date.now()}:${Math.random()}`).slice(0, 16);
+    modelSelections.set(token, model);
+    return [{ text: `${model.isDefault ? "* " : ""}${model.displayName || model.model}`, callback_data: `m:${token}` }];
+  });
+
+  await telegram("sendMessage", {
+    chat_id: TELEGRAM_CHAT_ID,
+    text: currentModel ? `Current bridge model override: ${currentModel}` : "Choose a Codex model for future turns:",
+    reply_markup: { inline_keyboard: buttons },
+  });
+}
+
+async function sendResumePicker() {
+  const upstream = getActiveUpstream();
+  if (!upstream) {
+    await sendTelegramText("Codex upstream is not connected. Start Codex with codex-telegram first.");
+    return;
+  }
+
+  const response = await sendBridgeRequest(upstream, "thread/list", {
+    limit: 10,
+    sortKey: "updated_at",
+    sortDirection: "desc",
+    archived: false,
+  });
+  if (response.error) {
+    await sendTelegramText(`Failed to load threads: ${response.error.message || JSON.stringify(response.error)}`);
+    return;
+  }
+
+  const threads = response.result?.data || [];
+  if (!threads.length) {
+    await sendTelegramText("No Codex threads found.");
+    return;
+  }
+
+  const buttons = threads.map((thread) => {
+    const token = shortApprovalToken(`${thread.id}:${Date.now()}:${Math.random()}`).slice(0, 16);
+    resumeSelections.set(token, thread);
+    return [{ text: formatThreadButton(thread), callback_data: `r:${token}` }];
+  });
+
+  await telegram("sendMessage", {
+    chat_id: TELEGRAM_CHAT_ID,
+    text: "Choose a Codex thread to resume:",
+    reply_markup: { inline_keyboard: buttons },
+  });
+}
+
+async function stopActiveTurn() {
+  const upstream = getActiveUpstream();
+  if (!upstream) {
+    await sendTelegramText("Codex upstream is not connected.");
+    return;
+  }
+  if (!activeThreadId || !activeTurnId) {
+    await sendTelegramText("No active Codex turn is running.");
+    return;
+  }
+
+  const response = await sendBridgeRequest(upstream, "turn/interrupt", {
+    threadId: activeThreadId,
+    turnId: activeTurnId,
+  });
+  if (response.error) {
+    await sendTelegramText(`Failed to stop turn: ${response.error.message || JSON.stringify(response.error)}`);
+    return;
+  }
+
+  await sendTelegramText("Stop request sent to Codex.");
+}
+
+async function compactActiveThread() {
+  const upstream = getActiveUpstream();
+  if (!upstream) {
+    await sendTelegramText("Codex upstream is not connected.");
+    return;
+  }
+  if (!activeThreadId) {
+    await sendTelegramText("No active Codex thread to compact.");
+    return;
+  }
+
+  const response = await sendBridgeRequest(upstream, "thread/compact/start", { threadId: activeThreadId });
+  if (response.error) {
+    await sendTelegramText(`Failed to compact thread: ${response.error.message || JSON.stringify(response.error)}`);
+    return;
+  }
+
+  await sendTelegramText("Compaction request sent to Codex.");
+}
+
+async function sendCurrentDiff() {
+  const upstream = getActiveUpstream();
+  if (!upstream) {
+    await sendTelegramText("Codex upstream is not connected.");
+    return;
+  }
+  if (!activeCwd) {
+    await sendTelegramText("Current workspace cwd is unknown. Send one prompt from the screen CLI first.");
+    return;
+  }
+
+  const response = await sendBridgeRequest(upstream, "gitDiffToRemote", { cwd: activeCwd });
+  if (response.error) {
+    await sendTelegramText(`Failed to load diff: ${response.error.message || JSON.stringify(response.error)}`);
+    return;
+  }
+
+  const diff = response.result?.diff || "";
+  const sha = response.result?.sha || "";
+  if (!diff.trim()) {
+    await sendTelegramText(`No diff from remote${sha ? ` (${sha})` : ""}.`);
+    return;
+  }
+
+  await sendTelegramText(html(`<b>git diff${sha ? ` ${sha}` : ""}</b>\n<pre>${truncate(diff, TELEGRAM_CODE_LIMIT)}</pre>`));
+}
+
+async function sendReasoningPicker() {
+  await telegram("sendMessage", {
+    chat_id: TELEGRAM_CHAT_ID,
+    text: currentEffort ? `Current reasoning effort override: ${currentEffort}` : "Choose reasoning effort for future turns:",
+    reply_markup: {
+      inline_keyboard: REASONING_EFFORTS.map((effort) => [{ text: effort, callback_data: `e:${effort}` }]),
+    },
+  });
+}
+
+async function sendApprovalPolicyPicker() {
+  await telegram("sendMessage", {
+    chat_id: TELEGRAM_CHAT_ID,
+    text: currentApprovalPolicy ? `Current approval policy override: ${currentApprovalPolicy}` : "Choose approval policy for future turns:",
+    reply_markup: {
+      inline_keyboard: APPROVAL_POLICIES.map((policy) => [{ text: policy, callback_data: `ap:${policy}` }]),
+    },
+  });
+}
+
+async function startReview(argument) {
+  const upstream = getActiveUpstream();
+  if (!upstream) {
+    await sendTelegramText("Codex upstream is not connected.");
+    return;
+  }
+  if (!activeThreadId) {
+    await sendTelegramText("No active Codex thread to review.");
+    return;
+  }
+
+  const target = argument
+    ? { type: "custom", instructions: argument }
+    : { type: "uncommittedChanges" };
+  const response = await sendBridgeRequest(upstream, "review/start", {
+    threadId: activeThreadId,
+    target,
+    delivery: "inline",
+  });
+  if (response.error) {
+    await sendTelegramText(`Failed to start review: ${response.error.message || JSON.stringify(response.error)}`);
+    return;
+  }
+
+  await sendTelegramText("Review request sent to Codex.");
+}
+
+function getActiveUpstream() {
+  if (!activeClient) return null;
+  return upstreamByClient.get(activeClient) || null;
+}
+
+function sendBridgeRequest(upstream, method, params) {
+  const id = nextRequestId();
+  const request = { jsonrpc: "2.0", id, method, params };
+  return new Promise((resolveRequest) => {
+    const timeout = setTimeout(() => {
+      pendingBridgeRequests.delete(id);
+      resolveRequest({ error: { message: `${method} timed out` } });
+    }, 10_000);
+
+    pendingBridgeRequests.set(id, {
+      resolve: (message) => {
+        clearTimeout(timeout);
+        resolveRequest(message);
+      },
+    });
+
+    sendUpstream(upstream, JSON.stringify(request));
+  });
+}
+
+function withThreadOverrides(params) {
+  return {
+    ...params,
+    ...(currentModel ? { model: currentModel } : {}),
+    ...(currentApprovalPolicy ? { approvalPolicy: currentApprovalPolicy } : {}),
+  };
+}
+
+function withTurnOverrides(params) {
+  return {
+    ...params,
+    ...(currentModel ? { model: currentModel } : {}),
+    ...(currentEffort ? { effort: currentEffort } : {}),
+    ...(currentApprovalPolicy ? { approvalPolicy: currentApprovalPolicy } : {}),
+  };
 }
 
 async function injectTelegramText(text) {
@@ -673,11 +1101,18 @@ async function injectTelegramText(text) {
         params: {
           threadId: activeThreadId,
           input,
+          ...withTurnOverrides({}),
         },
       };
 
   sendUpstream(upstream, JSON.stringify(request));
   await sendTelegramText(`Sent to Codex: ${text}`);
+}
+
+function formatThreadButton(thread) {
+  const title = thread.name || thread.preview || thread.id;
+  const date = thread.updatedAt ? new Date(thread.updatedAt * 1000).toISOString().slice(0, 10) : "";
+  return truncateSingleLine(`${date} ${title}`, 58);
 }
 
 async function telegram(method, payload, timeoutMs = 15_000) {
@@ -968,6 +1403,12 @@ function splitTelegram(text, size) {
 function truncate(text, size) {
   if (!text || text.length <= size) return text || "";
   return `${text.slice(0, size - 28)}\n... truncated ${text.length - size + 28} chars`;
+}
+
+function truncateSingleLine(text, size) {
+  const normalized = String(text || "").replace(/\s+/g, " ").trim();
+  if (normalized.length <= size) return normalized;
+  return `${normalized.slice(0, size - 3)}...`;
 }
 
 function sleep(ms) {
