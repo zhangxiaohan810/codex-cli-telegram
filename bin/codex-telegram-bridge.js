@@ -17,7 +17,10 @@ const CODEX_UPSTREAM_WS = env.CODEX_UPSTREAM_WS || "ws://127.0.0.1:8765";
 const BRIDGE_HOST = env.BRIDGE_HOST || "127.0.0.1";
 const BRIDGE_PORT = Number(env.BRIDGE_PORT || 8766);
 const MIRROR_AGENT_MESSAGES = env.MIRROR_AGENT_MESSAGES !== "0";
+const MIRROR_PROCESS_EVENTS = env.MIRROR_PROCESS_EVENTS !== "0";
 const TELEGRAM_PROXY = env.TELEGRAM_PROXY || env.HTTPS_PROXY || env.HTTP_PROXY || "";
+const TELEGRAM_MESSAGE_LIMIT = 3500;
+const TELEGRAM_CODE_LIMIT = 2500;
 
 if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) {
   fatal("TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID are required. Copy .env.example to .env first.");
@@ -80,7 +83,15 @@ function handleClientMessage(client, upstream, data) {
     return;
   }
 
+  mirrorClientRequest(msg);
   sendUpstream(upstream, text);
+}
+
+function mirrorClientRequest(msg) {
+  if (!MIRROR_PROCESS_EVENTS || !msg?.method) return;
+  if (msg.method === "turn/start" || msg.method === "turn/steer" || msg.method === "thread/start") {
+    sendTelegramText(formatEventMessage(`client request: ${msg.method}`, msg.params));
+  }
 }
 
 function handleUpstreamMessage(client, upstream, data) {
@@ -168,14 +179,18 @@ async function sendApprovalToTelegram(record) {
 
 function formatApproval(record) {
   const p = record.params;
+  const details = formatRequestDetails(record);
   if (record.method === "item/commandExecution/requestApproval") {
     return html([
       "<b>Codex command approval</b>",
       "",
+      `method: <code>${record.method}</code>`,
+      `request id: <code>${record.requestId}</code>`,
       `cwd: <code>${p.cwd || ""}</code>`,
       `cmd: <code>${p.command || "(command unavailable)"}</code>`,
       p.reason ? `reason: ${p.reason}` : "",
       p.proposedExecpolicyAmendment ? `policy: <code>${JSON.stringify(p.proposedExecpolicyAmendment)}</code>` : "",
+      details,
     ].filter(Boolean).join("\n"));
   }
 
@@ -184,9 +199,12 @@ function formatApproval(record) {
     return html([
       "<b>Codex command approval</b>",
       "",
+      `method: <code>${record.method}</code>`,
+      `request id: <code>${record.requestId}</code>`,
       `cwd: <code>${p.cwd || ""}</code>`,
       `cmd: <code>${command}</code>`,
       p.reason ? `reason: ${p.reason}` : "",
+      details,
     ].filter(Boolean).join("\n"));
   }
 
@@ -194,9 +212,12 @@ function formatApproval(record) {
     return html([
       "<b>Codex file-change approval</b>",
       "",
+      `method: <code>${record.method}</code>`,
+      `request id: <code>${record.requestId}</code>`,
       `thread: <code>${p.threadId || ""}</code>`,
       `turn: <code>${p.turnId || ""}</code>`,
       `item: <code>${p.itemId || ""}</code>`,
+      details,
     ].join("\n"));
   }
 
@@ -205,8 +226,11 @@ function formatApproval(record) {
     return html([
       "<b>Codex patch approval</b>",
       "",
+      `method: <code>${record.method}</code>`,
+      `request id: <code>${record.requestId}</code>`,
       files.length ? `files: <code>${files.join(", ")}</code>` : "files: <code>(unknown)</code>",
       p.reason ? `reason: ${p.reason}` : "",
+      details,
     ].filter(Boolean).join("\n"));
   }
 
@@ -215,10 +239,21 @@ function formatApproval(record) {
     "",
     "Telegram mirror is read-only for this request type. Approve or deny it on the screen client.",
     "",
+    `method: <code>${record.method}</code>`,
+    `request id: <code>${record.requestId}</code>`,
     `cwd: <code>${p.cwd || ""}</code>`,
     p.reason ? `reason: ${p.reason}` : "",
     `permissions: <code>${JSON.stringify(p.permissions || {})}</code>`,
+    details,
   ].filter(Boolean).join("\n"));
+}
+
+function formatRequestDetails(record) {
+  return [
+    "",
+    "<b>request params</b>",
+    `<pre>${truncate(JSON.stringify(record.params || {}, null, 2), TELEGRAM_CODE_LIMIT)}</pre>`,
+  ].join("\n");
 }
 
 async function handleTelegramCallback(query) {
@@ -297,29 +332,89 @@ async function editTelegramApproval(message, suffix) {
 }
 
 function mirrorNotification(msg) {
-  if (!MIRROR_AGENT_MESSAGES) return;
+  if (!MIRROR_AGENT_MESSAGES && !MIRROR_PROCESS_EVENTS) return;
 
-  if (msg.method === "agent/message/delta") {
-    bufferTelegram(`agent:${msg.params?.threadId || "default"}`, msg.params?.delta || "");
+  if (msg.method === "agent/message/delta" || msg.method === "item/agent/messageDelta") {
+    if (!MIRROR_AGENT_MESSAGES) return;
+    bufferTelegram(`agent:${msg.params?.threadId || "default"}`, "assistant", msg.params?.delta || "");
+    return;
+  }
+
+  if (msg.method === "item/reasoning/summaryTextDelta") {
+    if (!MIRROR_AGENT_MESSAGES) return;
+    bufferTelegram(`reasoning:${msg.params?.itemId || "default"}`, "reasoning", msg.params?.delta || "");
     return;
   }
 
   if (msg.method === "turn/completed") {
     flushAllTelegramBuffers();
+    if (MIRROR_PROCESS_EVENTS) sendTelegramText(formatEventMessage("turn completed", msg.params));
+    return;
+  }
+
+  if (msg.method === "turn/started") {
+    if (MIRROR_PROCESS_EVENTS) sendTelegramText(formatEventMessage("turn started", msg.params));
+    return;
+  }
+
+  if (msg.method === "item/started") {
+    if (MIRROR_PROCESS_EVENTS) sendTelegramText(formatItemEvent("item started", msg.params));
+    return;
+  }
+
+  if (msg.method === "item/completed") {
+    flushAllTelegramBuffers();
+    if (MIRROR_PROCESS_EVENTS) sendTelegramText(formatItemEvent("item completed", msg.params));
     return;
   }
 
   if (msg.method === "item/commandExecution/outputDelta") {
+    if (!MIRROR_PROCESS_EVENTS) return;
     const delta = msg.params?.delta;
-    if (delta && delta.length < 240) {
-      bufferTelegram(`cmd:${msg.params?.itemId || "default"}`, delta);
-    }
+    bufferTelegram(`cmd:${msg.params?.itemId || "default"}`, "cmd output", delta || "");
+    return;
+  }
+
+  if (msg.method === "item/commandExecution/terminalInteraction") {
+    if (MIRROR_PROCESS_EVENTS) sendTelegramText(formatEventMessage("terminal interaction", msg.params));
   }
 }
 
-function bufferTelegram(key, delta) {
+function formatEventMessage(title, params) {
+  return html([
+    `<b>${title}</b>`,
+    `<pre>${truncate(JSON.stringify(params || {}, null, 2), TELEGRAM_CODE_LIMIT)}</pre>`,
+  ].join("\n"));
+}
+
+function formatItemEvent(title, params) {
+  const item = params?.item || {};
+  const type = item.type || item.kind || item.status || "";
+  const summary = summarizeItem(item);
+  return html([
+    `<b>${title}${type ? `: ${type}` : ""}</b>`,
+    summary ? "" : `<pre>${truncate(JSON.stringify(params || {}, null, 2), TELEGRAM_CODE_LIMIT)}</pre>`,
+    summary,
+  ].filter(Boolean).join("\n"));
+}
+
+function summarizeItem(item) {
+  const candidates = [
+    item.command,
+    item.text,
+    item.message,
+    item.title,
+    item.name,
+    item.status,
+  ].filter(Boolean);
+  const text = candidates.length ? candidates.map((value) => typeof value === "string" ? value : JSON.stringify(value)).join("\n") : "";
+  return text ? `<pre>${truncate(text, TELEGRAM_CODE_LIMIT)}</pre>` : "";
+}
+
+function bufferTelegram(key, label, delta) {
   if (!delta) return;
-  const existing = agentBuffers.get(key) || { text: "", timer: null };
+  const existing = agentBuffers.get(key) || { label, text: "", timer: null };
+  existing.label = label;
   existing.text += delta;
   if (existing.text.length > 3000) {
     flushTelegramBuffer(key);
@@ -342,14 +437,19 @@ function flushTelegramBuffer(key) {
   const text = buffer.text.trim();
   if (!text) return;
 
-  const chunks = splitTelegram(text, 3500);
+  const chunks = splitTelegram(text, TELEGRAM_MESSAGE_LIMIT);
   for (const chunk of chunks) {
-    telegram("sendMessage", {
-      chat_id: TELEGRAM_CHAT_ID,
-      text: chunk,
-      disable_web_page_preview: true,
-    }).catch((error) => console.error("[telegram] mirror failed:", error.message));
+    sendTelegramText(html(`<b>${buffer.label}</b>\n<pre>${truncate(chunk, TELEGRAM_MESSAGE_LIMIT)}</pre>`));
   }
+}
+
+function sendTelegramText(text) {
+  telegram("sendMessage", {
+    chat_id: TELEGRAM_CHAT_ID,
+    text,
+    parse_mode: "HTML",
+    disable_web_page_preview: true,
+  }).catch((error) => console.error("[telegram] mirror failed:", error.message));
 }
 
 async function startTelegramPolling() {
@@ -659,13 +759,18 @@ function html(text) {
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
-    .replace(/&lt;(\/?)(b|code)&gt;/g, "<$1$2>");
+    .replace(/&lt;(\/?)(b|code|pre)&gt;/g, "<$1$2>");
 }
 
 function splitTelegram(text, size) {
   const chunks = [];
   for (let i = 0; i < text.length; i += size) chunks.push(text.slice(i, i + size));
   return chunks;
+}
+
+function truncate(text, size) {
+  if (!text || text.length <= size) return text || "";
+  return `${text.slice(0, size - 28)}\n... truncated ${text.length - size + 28} chars`;
 }
 
 function sleep(ms) {
