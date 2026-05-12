@@ -31,6 +31,7 @@ const upstreamByClient = new Map();
 const pendingApprovals = new Map();
 const seenClientResponses = new Set();
 const agentBuffers = new Map();
+const fileChangePatches = new Map();
 let telegramOffset = 0;
 
 startTelegramPolling().catch((error) => {
@@ -185,8 +186,6 @@ function formatApproval(record) {
     return html([
       "<b>Codex command approval</b>",
       "",
-      `method: <code>${record.method}</code>`,
-      `request id: <code>${record.requestId}</code>`,
       `cwd: <code>${p.cwd || ""}</code>`,
       `cmd: <code>${p.command || "(command unavailable)"}</code>`,
       p.reason ? `reason: ${p.reason}` : "",
@@ -200,8 +199,6 @@ function formatApproval(record) {
     return html([
       "<b>Codex command approval</b>",
       "",
-      `method: <code>${record.method}</code>`,
-      `request id: <code>${record.requestId}</code>`,
       `cwd: <code>${p.cwd || ""}</code>`,
       `cmd: <code>${command}</code>`,
       p.reason ? `reason: ${p.reason}` : "",
@@ -210,16 +207,14 @@ function formatApproval(record) {
   }
 
   if (record.method === "item/fileChange/requestApproval") {
+    const patch = fileChangePatches.get(p.itemId);
     return html([
       "<b>Codex file-change approval</b>",
       "",
-      `method: <code>${record.method}</code>`,
-      `request id: <code>${record.requestId}</code>`,
-      `thread: <code>${p.threadId || ""}</code>`,
-      `turn: <code>${p.turnId || ""}</code>`,
-      `item: <code>${p.itemId || ""}</code>`,
+      patch ? formatPatchSummary(patch.changes) : "File changes are pending approval.",
+      p.reason ? `reason: ${p.reason}` : "",
       details,
-    ].join("\n"));
+    ].filter(Boolean).join("\n"));
   }
 
   if (record.method === "applyPatchApproval") {
@@ -227,9 +222,7 @@ function formatApproval(record) {
     return html([
       "<b>Codex patch approval</b>",
       "",
-      `method: <code>${record.method}</code>`,
-      `request id: <code>${record.requestId}</code>`,
-      files.length ? `files: <code>${files.join(", ")}</code>` : "files: <code>(unknown)</code>",
+      formatLegacyPatchSummary(p.fileChanges || {}, files),
       p.reason ? `reason: ${p.reason}` : "",
       details,
     ].filter(Boolean).join("\n"));
@@ -240,13 +233,33 @@ function formatApproval(record) {
     "",
     "Telegram mirror is read-only for this request type. Approve or deny it on the screen client.",
     "",
-    `method: <code>${record.method}</code>`,
-    `request id: <code>${record.requestId}</code>`,
     `cwd: <code>${p.cwd || ""}</code>`,
     p.reason ? `reason: ${p.reason}` : "",
     `permissions: <code>${JSON.stringify(p.permissions || {})}</code>`,
     details,
   ].filter(Boolean).join("\n"));
+}
+
+function formatPatchSummary(changes = []) {
+  if (!changes.length) return "files: <code>(unknown)</code>";
+  return changes.map((change) => {
+    const kind = change.kind?.type || "update";
+    const path = change.path || "(unknown)";
+    const heading = `${kind}: ${path}`;
+    const diff = change.diff ? `\n<pre>${truncate(change.diff, TELEGRAM_CODE_LIMIT)}</pre>` : "";
+    return `<b>${heading}</b>${diff}`;
+  }).join("\n\n");
+}
+
+function formatLegacyPatchSummary(fileChanges = {}, files = Object.keys(fileChanges)) {
+  if (!files.length) return "files: <code>(unknown)</code>";
+  return files.map((path) => {
+    const change = fileChanges[path] || {};
+    const kind = change.type || "update";
+    const body = change.unified_diff || change.content || "";
+    const diff = body ? `\n<pre>${truncate(body, TELEGRAM_CODE_LIMIT)}</pre>` : "";
+    return `<b>${kind}: ${path}</b>${diff}`;
+  }).join("\n\n");
 }
 
 function formatRequestDetails(record) {
@@ -333,6 +346,11 @@ async function editTelegramApproval(message, suffix) {
 }
 
 function mirrorNotification(msg) {
+  if (msg.method === "item/fileChange/patchUpdated") {
+    fileChangePatches.set(msg.params?.itemId, msg.params || {});
+    return;
+  }
+
   if (!MIRROR_AGENT_MESSAGES) return;
 
   if (msg.method === "agent/message/delta" || msg.method === "item/agent/messageDelta") {
