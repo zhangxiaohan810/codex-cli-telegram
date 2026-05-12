@@ -2,8 +2,12 @@
 
 import { createHash, randomBytes } from "node:crypto";
 import { createServer } from "node:http";
+import { request as httpsRequest } from "node:https";
+import { connect as netConnect } from "node:net";
+import { connect as tlsConnect } from "node:tls";
 import { readFileSync, existsSync } from "node:fs";
 import { resolve } from "node:path";
+import { URL } from "node:url";
 
 const env = loadEnv();
 
@@ -13,6 +17,7 @@ const CODEX_UPSTREAM_WS = env.CODEX_UPSTREAM_WS || "ws://127.0.0.1:8765";
 const BRIDGE_HOST = env.BRIDGE_HOST || "127.0.0.1";
 const BRIDGE_PORT = Number(env.BRIDGE_PORT || 8766);
 const MIRROR_AGENT_MESSAGES = env.MIRROR_AGENT_MESSAGES !== "0";
+const TELEGRAM_PROXY = env.TELEGRAM_PROXY || env.HTTPS_PROXY || env.HTTP_PROXY || "";
 
 if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) {
   fatal("TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID are required. Copy .env.example to .env first.");
@@ -63,6 +68,7 @@ server.on("upgrade", (req, socket, head) => {
 server.listen(BRIDGE_PORT, BRIDGE_HOST, () => {
   console.log(`[bridge] listening ws://${BRIDGE_HOST}:${BRIDGE_PORT}`);
   console.log(`[bridge] connect screen client with: codex --remote ws://${BRIDGE_HOST}:${BRIDGE_PORT}`);
+  if (TELEGRAM_PROXY) console.log(`[telegram] proxy=${TELEGRAM_PROXY}`);
 });
 
 function handleClientMessage(client, upstream, data) {
@@ -348,23 +354,112 @@ async function handleTelegramMessage(message) {
 }
 
 async function telegram(method, payload, timeoutMs = 15_000) {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    const response = await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/${method}`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(payload),
-      signal: controller.signal,
-    });
-    const json = await response.json();
-    if (!json.ok) {
-      throw new Error(`${method}: ${json.description || response.statusText}`);
-    }
-    return json.result;
-  } finally {
-    clearTimeout(timeout);
+  const url = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/${method}`;
+  const json = TELEGRAM_PROXY
+    ? await postJsonViaHttpProxy(url, payload, TELEGRAM_PROXY, timeoutMs)
+    : await postJsonDirect(url, payload, timeoutMs);
+  if (!json.ok) {
+    throw new Error(`${method}: ${json.description || "request failed"}`);
   }
+  return json.result;
+}
+
+function postJsonDirect(url, payload, timeoutMs) {
+  const body = JSON.stringify(payload);
+  const target = new URL(url);
+  return new Promise((resolveRequest, rejectRequest) => {
+    const req = httpsRequest({
+      hostname: target.hostname,
+      port: target.port || 443,
+      path: `${target.pathname}${target.search}`,
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "content-length": Buffer.byteLength(body),
+      },
+      timeout: timeoutMs,
+    }, (res) => collectJson(res, resolveRequest, rejectRequest));
+
+    req.on("timeout", () => req.destroy(new Error("request timeout")));
+    req.on("error", rejectRequest);
+    req.end(body);
+  });
+}
+
+function postJsonViaHttpProxy(url, payload, proxyUrl, timeoutMs) {
+  const body = JSON.stringify(payload);
+  const target = new URL(url);
+  const proxy = new URL(proxyUrl);
+
+  return new Promise((resolveRequest, rejectRequest) => {
+    const socket = netConnect(Number(proxy.port || 8080), proxy.hostname);
+    socket.setTimeout(timeoutMs);
+    socket.once("timeout", () => socket.destroy(new Error("proxy timeout")));
+    socket.once("error", rejectRequest);
+
+    socket.once("connect", () => {
+      socket.write([
+        `CONNECT ${target.hostname}:443 HTTP/1.1`,
+        `Host: ${target.hostname}:443`,
+        "Proxy-Connection: keep-alive",
+        "",
+        "",
+      ].join("\r\n"));
+    });
+
+    let header = Buffer.alloc(0);
+    const onProxyData = (chunk) => {
+      header = Buffer.concat([header, chunk]);
+      const end = header.indexOf("\r\n\r\n");
+      if (end === -1) return;
+
+      socket.off("data", onProxyData);
+      const statusLine = header.subarray(0, end).toString("utf8").split("\r\n")[0] || "";
+      if (!statusLine.includes(" 200 ")) {
+        socket.destroy();
+        rejectRequest(new Error(`proxy CONNECT failed: ${statusLine}`));
+        return;
+      }
+
+      const rest = header.subarray(end + 4);
+      const req = httpsRequest({
+        hostname: target.hostname,
+        port: 443,
+        path: `${target.pathname}${target.search}`,
+        method: "POST",
+        createConnection: () => tlsConnect({
+          socket,
+          servername: target.hostname,
+        }),
+        headers: {
+          "content-type": "application/json",
+          "content-length": Buffer.byteLength(body),
+        },
+        timeout: timeoutMs,
+      }, (res) => collectJson(res, resolveRequest, rejectRequest));
+
+      req.on("timeout", () => req.destroy(new Error("request timeout")));
+      req.on("error", rejectRequest);
+      req.end(body);
+      if (rest.length) socket.unshift(rest);
+    };
+
+    socket.on("data", onProxyData);
+  });
+}
+
+function collectJson(res, resolveRequest, rejectRequest) {
+  const chunks = [];
+  res.on("data", (chunk) => chunks.push(chunk));
+  res.on("end", () => {
+    const body = Buffer.concat(chunks).toString("utf8");
+    try {
+      resolveRequest(JSON.parse(body));
+    } catch {
+      rejectRequest(new Error(`invalid JSON response: HTTP ${res.statusCode}`));
+    }
+  });
+  res.on("error", rejectRequest);
 }
 
 function acceptWebSocket(req, socket, head) {
