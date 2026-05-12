@@ -31,6 +31,7 @@ const upstreamByClient = new Map();
 const pendingApprovals = new Map();
 const seenClientResponses = new Set();
 const agentBuffers = new Map();
+const streamedItems = new Set();
 const fileChangePatches = new Map();
 let telegramOffset = 0;
 
@@ -353,8 +354,13 @@ function mirrorNotification(msg) {
 
   if (!MIRROR_AGENT_MESSAGES) return;
 
-  if (msg.method === "agent/message/delta" || msg.method === "item/agent/messageDelta") {
-    bufferTelegram(`agent:${msg.params?.threadId || "default"}`, "assistant", msg.params?.delta || "");
+  if (msg.method === "item/agentMessage/delta") {
+    bufferTelegram(`agent:${msg.params?.itemId || "default"}`, "assistant", msg.params?.delta || "");
+    return;
+  }
+
+  if (msg.method === "item/plan/delta") {
+    bufferTelegram(`plan:${msg.params?.itemId || "default"}`, "plan", msg.params?.delta || "");
     return;
   }
 
@@ -370,10 +376,35 @@ function mirrorNotification(msg) {
 
   if (msg.method === "item/completed") {
     flushAllTelegramBuffers();
+    mirrorCompletedTextItem(msg.params?.item);
     return;
   }
 
   if (MIRROR_PROCESS_EVENTS) mirrorProcessNotification(msg);
+}
+
+function mirrorCompletedTextItem(item) {
+  if (!item?.id || streamedItems.has(item.id)) return;
+
+  if (item.type === "agentMessage" && item.text) {
+    sendTelegramText(html(`<b>assistant</b>\n<pre>${truncate(item.text, TELEGRAM_MESSAGE_LIMIT)}</pre>`));
+    streamedItems.add(item.id);
+    return;
+  }
+
+  if (item.type === "plan" && item.text) {
+    sendTelegramText(html(`<b>plan</b>\n<pre>${truncate(item.text, TELEGRAM_MESSAGE_LIMIT)}</pre>`));
+    streamedItems.add(item.id);
+    return;
+  }
+
+  if (item.type === "reasoning") {
+    const text = [...(item.summary || []), ...(item.content || [])].filter(Boolean).join("\n");
+    if (text) {
+      sendTelegramText(html(`<b>reasoning</b>\n<pre>${truncate(text, TELEGRAM_MESSAGE_LIMIT)}</pre>`));
+      streamedItems.add(item.id);
+    }
+  }
 }
 
 function mirrorProcessNotification(msg) {
@@ -430,6 +461,8 @@ function summarizeItem(item) {
 
 function bufferTelegram(key, label, delta) {
   if (!delta) return;
+  const itemId = key.includes(":") ? key.split(":").slice(1).join(":") : key;
+  if (itemId) streamedItems.add(itemId);
   const existing = agentBuffers.get(key) || { label, text: "", timer: null };
   existing.label = label;
   existing.text += delta;
