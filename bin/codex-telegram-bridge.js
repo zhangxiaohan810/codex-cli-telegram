@@ -390,7 +390,7 @@ async function handleTelegramCallback(query) {
 
 async function handleScreenOnlyCallback(query, command) {
   try {
-    await sendPtyControl({ action: "write", text: `${command}\r` });
+    await sendPtyControl({ action: "submit", text: command });
     await telegram("editMessageText", {
       chat_id: query.message.chat?.id || TELEGRAM_CHAT_ID,
       message_id: query.message.message_id,
@@ -819,16 +819,16 @@ async function stopActiveTurn() {
 }
 
 async function sendSlashToScreenCli(text) {
-  await writeScreenCliInput(`${text}\r`, `Sent to screen Codex CLI: ${text}`);
+  await submitScreenCliInput(text, `Sent to screen Codex CLI: ${text}`);
 }
 
 async function sendTextToScreenCli(text) {
-  await writeScreenCliInput(`${text}\r`, `Sent to screen Codex CLI: ${text}`);
+  await submitScreenCliInput(text, `Sent to screen Codex CLI: ${text}`);
 }
 
-async function writeScreenCliInput(text, successMessage) {
+async function submitScreenCliInput(text, successMessage) {
   try {
-    await sendPtyControl({ action: "write", text });
+    await sendPtyControl({ action: "submit", text });
     await sendTelegramText(successMessage);
   } catch (error) {
     await sendTelegramText(`Failed to send input to screen Codex CLI: ${error.message}`);

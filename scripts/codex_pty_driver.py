@@ -9,9 +9,9 @@ import pty
 import select
 import signal
 import socket
-import struct
 import sys
 import termios
+import time
 import tty
 
 
@@ -108,12 +108,17 @@ def run_loop(child_pid, master_fd, server):
 def handle_control_request(conn, payload, master_fd):
     try:
         request = json.loads(payload.decode("utf-8"))
-        if request.get("action") != "write":
+        action = request.get("action")
+        if action not in ("write", "submit"):
             raise ValueError("unsupported action")
         text = request.get("text")
         if not isinstance(text, str):
             raise ValueError("text must be a string")
-        os.write(master_fd, text.encode("utf-8"))
+
+        if action == "submit":
+            submit_text(master_fd, text, request)
+        else:
+            os.write(master_fd, text.encode("utf-8"))
         response = {"ok": True}
     except Exception as exc:
         response = {"ok": False, "error": str(exc)}
@@ -122,6 +127,29 @@ def handle_control_request(conn, payload, master_fd):
         conn.sendall((json.dumps(response) + "\n").encode("utf-8"))
     finally:
         conn.close()
+
+
+def submit_text(master_fd, text, request):
+    char_delay_ms = request.get("charDelayMs", 12)
+    submit_delay_ms = request.get("submitDelayMs", 80)
+    enter = decode_enter_sequence(request.get("enter", "cr"))
+
+    for char in text:
+        os.write(master_fd, char.encode("utf-8"))
+        if char_delay_ms > 0:
+            time.sleep(char_delay_ms / 1000)
+
+    if submit_delay_ms > 0:
+        time.sleep(submit_delay_ms / 1000)
+    os.write(master_fd, enter.encode("utf-8"))
+
+
+def decode_enter_sequence(value):
+    if value == "lf":
+        return "\n"
+    if value == "crlf":
+        return "\r\n"
+    return "\r"
 
 
 def resize_pty(master_fd):
