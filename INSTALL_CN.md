@@ -213,4 +213,4 @@ codex-telegram
 
 同一个 Telegram bot 不建议同时在两台电脑上运行 bridge，否则消息可能被另一台机器抢走。多台机器同时用时，建议每台机器单独创建一个 bot。
 
-同一台机器上也只保留一个 `codex-telegram` 或 `codex --remote ws://127.0.0.1:8766` 窗口。新版 bridge 会拒绝第二个 CLI 连接，防止 Telegram 输入串到错误窗口。
+同一台机器上只保留一个 `codex-telegram` 主窗口。Telegram 输入只绑定第一个屏幕 `codex --remote` 连接；Codex TUI 内部为了 `/resume` 等功能额外创建的连接会作为辅助连接透传，不会接管 Telegram 路由。

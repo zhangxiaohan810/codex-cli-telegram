@@ -27,8 +27,6 @@ const TELEGRAM_PROXY = env.TELEGRAM_PROXY || env.HTTPS_PROXY || env.HTTP_PROXY |
 const TELEGRAM_CODE_LIMIT = 2500;
 const TELEGRAM_RETRIES = Number(env.TELEGRAM_RETRIES || 2);
 const TELEGRAM_SAFE_MESSAGE_LIMIT = Number(env.TELEGRAM_SAFE_MESSAGE_LIMIT || 3800);
-const WS_CLOSE_POLICY_VIOLATION = 1008;
-
 if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) {
   fatal("TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID are required. Copy .env.example to .env first.");
 }
@@ -64,21 +62,15 @@ server.on("upgrade", (req, socket, head) => {
   }
 
   const client = acceptWebSocket(req, socket, head);
-  if (activeClient?.open) {
-    console.warn(`[bridge] rejected extra client ${client.id}; active client=${activeClient.id}`);
-    client.sendClose(WS_CLOSE_POLICY_VIOLATION, "codex-telegram-bridge already has an active Codex CLI client");
-    sendTelegramText(`Rejected extra Codex CLI connection. Active client is ${activeClient.id}. Close the old codex --remote window before opening another.`).catch(() => {});
-    return;
-  }
-
+  const isActiveClient = !activeClient?.open;
   const upstream = new WebSocket(CODEX_UPSTREAM_WS);
   upstreamByClient.set(client, upstream);
-  activeClient = client;
+  if (isActiveClient) activeClient = client;
 
-  console.log(`[bridge] client connected id=${client.id}, upstream=${CODEX_UPSTREAM_WS}`);
+  console.log(`[bridge] ${isActiveClient ? "active" : "auxiliary"} client connected id=${client.id}, upstream=${CODEX_UPSTREAM_WS}`);
 
-  client.onMessage = (data) => handleClientMessage(client, upstream, data);
-  upstream.addEventListener("message", (event) => handleUpstreamMessage(client, upstream, event.data));
+  client.onMessage = (data) => handleClientMessage(client, upstream, data, isActiveClient);
+  upstream.addEventListener("message", (event) => handleUpstreamMessage(client, upstream, event.data, isActiveClient));
 
   client.onClose = () => closePair(client, upstream);
   client.onError = (error) => {
@@ -102,7 +94,7 @@ server.listen(BRIDGE_PORT, BRIDGE_HOST, () => {
   if (TELEGRAM_PROXY) console.log(`[telegram] proxy=${TELEGRAM_PROXY}`);
 });
 
-function handleClientMessage(client, upstream, data) {
+function handleClientMessage(client, upstream, data, isActiveClient = true) {
   const text = data.toString();
   const msg = parseJson(text);
 
@@ -111,8 +103,10 @@ function handleClientMessage(client, upstream, data) {
     return;
   }
 
-  trackClientRequest(msg);
-  if (MIRROR_PROCESS_EVENTS) mirrorClientRequest(msg);
+  if (isActiveClient) {
+    trackClientRequest(msg);
+    if (MIRROR_PROCESS_EVENTS) mirrorClientRequest(msg);
+  }
   sendUpstream(upstream, text);
 }
 
@@ -134,13 +128,13 @@ function mirrorClientRequest(msg) {
   }
 }
 
-function handleUpstreamMessage(client, upstream, data) {
+function handleUpstreamMessage(client, upstream, data, isActiveClient = true) {
   const text = data.toString();
   const msg = parseJson(text);
 
-  if (handleBridgeResponse(msg)) return;
+  if (isActiveClient && handleBridgeResponse(msg)) return;
 
-  if (msg) {
+  if (msg && isActiveClient) {
     if (msg.id !== undefined && msg.method) {
       console.log(`[bridge] server request method=${msg.method} id=${msg.id}`);
     }

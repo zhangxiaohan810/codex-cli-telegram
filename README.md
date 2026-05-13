@@ -214,7 +214,7 @@ For debugging command routing, set `BRIDGE_DEBUG_RPC=1` in `.env` and restart `c
 ## Notes
 
 - Keep both WebSocket listeners on `127.0.0.1` unless you have a separate authenticated tunnel.
-- The bridge accepts only one `codex --remote` client at a time. Extra CLI windows are rejected so Telegram input cannot be routed to the wrong session.
+- Telegram input is bound to the first active screen `codex --remote` client. Extra WebSocket connections are proxied as auxiliary app-server connections so Codex TUI features such as `/resume` can load session data, but they do not take over Telegram routing.
 - A Telegram bot token can only be polled by one bridge process at a time. If logs show `getUpdates: Conflict`, stop the other bridge or use a separate bot token for that machine.
 - The bridge only accepts callback clicks from `TELEGRAM_CHAT_ID`.
 - `item/permissions/requestApproval` is mirrored for visibility, but the first version does not synthesize a permission profile response from Telegram because that response shape is more complex than command/file-change approvals. Approve those on screen.
