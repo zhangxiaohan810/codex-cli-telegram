@@ -7,6 +7,7 @@ access with the Logitech G610 lighting controller.
 
 from __future__ import annotations
 
+import argparse
 import json
 from pathlib import Path
 
@@ -163,13 +164,10 @@ if __name__ == "__main__":
 """
 
 
-START_SCRIPT = """#!/usr/bin/env bash
+START_SCRIPT_TEMPLATE = """#!/usr/bin/env bash
 set -euo pipefail
 
-PY="$HOME/miniforge3/bin/python"
-if [ ! -x "$PY" ]; then
-  PY="$(command -v python3)"
-fi
+PY="{python_path}"
 
 SERVICE="$HOME/.codex-g610/input_mapper.py"
 PIDFILE="$HOME/.codex-g610/input-mapper.pid"
@@ -178,6 +176,13 @@ LOG="$HOME/.codex-g610/input-mapper.log"
 if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
   echo "already running pid $(cat "$PIDFILE")"
   exit 0
+fi
+
+if ! "$PY" -c 'from AppKit import NSEvent; from Cocoa import NSRunLoop; from Quartz import CGEventTapCreate' >/dev/null 2>&1; then
+  echo "Missing pyobjc in $PY" >&2
+  echo "Install it with:" >&2
+  echo "  $PY -m pip install pyobjc" >&2
+  exit 1
 fi
 
 nohup "$PY" "$SERVICE" >"$LOG" 2>&1 &
@@ -249,6 +254,10 @@ Edit mapping.json to customize the mapping logic.
 
 
 def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--python-path", default=str(Path.home() / "miniforge3" / "bin" / "python"))
+    args = parser.parse_args()
+
     base = Path.home() / ".codex-g610"
     base.mkdir(parents=True, exist_ok=True)
     bin_dir = Path.home() / "bin"
@@ -280,7 +289,7 @@ def main() -> int:
     )
     service_path.write_text(SERVICE_SOURCE)
     readme_path.write_text(README)
-    start_path.write_text(START_SCRIPT)
+    start_path.write_text(START_SCRIPT_TEMPLATE.format(python_path=args.python_path))
     stop_path.write_text(STOP_SCRIPT)
     status_path.write_text(STATUS_SCRIPT)
 
