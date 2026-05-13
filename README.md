@@ -20,10 +20,11 @@ Install prerequisites:
 
 ```bash
 node --version
+python3 --version
 codex --version
 ```
 
-Node 22+ is recommended. Codex must support `app-server` and `--remote`.
+Node 22+ is recommended. Python 3 is used by the PTY driver. Codex must support `app-server` and `--remote`.
 
 Clone or copy this folder to the server, then install the CLI link:
 
@@ -48,6 +49,9 @@ TELEGRAM_CHAT_ID=your_numeric_chat_id
 CODEX_UPSTREAM_WS=ws://127.0.0.1:8765
 BRIDGE_HOST=127.0.0.1
 BRIDGE_PORT=8766
+PTY_CONTROL_HOST=127.0.0.1
+PTY_CONTROL_PORT=8767
+TELEGRAM_INPUT_MODE=tui
 MIRROR_AGENT_MESSAGES=1
 MIRROR_PROCESS_EVENTS=0
 INCLUDE_APPROVAL_PARAMS=0
@@ -84,6 +88,8 @@ This starts `codex app-server` and `codex-telegram-bridge` in the background if 
 codex --remote ws://127.0.0.1:8766
 ```
 
+The visible Codex CLI is wrapped by a small Python PTY driver. Telegram input is typed into that same screen CLI through `127.0.0.1:8767`, so slash commands like `/model`, `/new`, and `/resume` run through Codex's native TUI command handling instead of changing bridge-only state.
+
 Logs are written under `.logs/`.
 
 Manual startup is still available:
@@ -104,7 +110,7 @@ codex-telegram-bridge
 Terminal 3:
 
 ```bash
-codex --remote ws://127.0.0.1:8766
+python3 scripts/codex_pty_driver.py --control-host 127.0.0.1 --control-port 8767 codex --remote ws://127.0.0.1:8766
 ```
 
 Now use Codex normally on screen. When Codex asks for approval, Telegram receives buttons too.
@@ -187,29 +193,21 @@ Bridge-local commands:
 /bridge_status
 ```
 
-Supported Codex commands:
-
-```text
-/status
-/diff
-/review
-/compact
-/stop
-```
-
-Unsupported slash commands are rejected by the bridge instead of being sent as normal prompts.
-
-Screen-local commands must be run in the screen Codex CLI, not from Telegram:
+Codex slash commands are typed into the screen CLI:
 
 ```text
 /model
 /reasoning
 /approvals
+/status
+/diff
+/review
+/compact
 /new
 /resume
 ```
 
-Codex CLI 0.130.0 does not expose a remote protocol for the bridge to execute those slash commands inside the connected TUI. The bridge deliberately does not apply Telegram-only model, reasoning, approval, new-thread, or resume-thread overrides because that would make Telegram and the terminal use different state.
+`/stop` is kept as a bridge-level interrupt for the active Codex turn. `/bridge_status` shows bridge diagnostics. Other slash commands are passed to the screen CLI instead of being sent as normal prompt text.
 
 For debugging command routing, set `BRIDGE_DEBUG_RPC=1` in `.env` and restart `codex-telegram-bridge`.
 

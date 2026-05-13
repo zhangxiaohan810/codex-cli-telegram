@@ -16,6 +16,9 @@ const TELEGRAM_CHAT_ID = env.TELEGRAM_CHAT_ID;
 const CODEX_UPSTREAM_WS = env.CODEX_UPSTREAM_WS || "ws://127.0.0.1:8765";
 const BRIDGE_HOST = env.BRIDGE_HOST || "127.0.0.1";
 const BRIDGE_PORT = Number(env.BRIDGE_PORT || 8766);
+const PTY_CONTROL_HOST = env.PTY_CONTROL_HOST || "127.0.0.1";
+const PTY_CONTROL_PORT = Number(env.PTY_CONTROL_PORT || 8767);
+const TELEGRAM_INPUT_MODE = env.TELEGRAM_INPUT_MODE || "tui";
 const MIRROR_AGENT_MESSAGES = env.MIRROR_AGENT_MESSAGES !== "0";
 const MIRROR_PROCESS_EVENTS = env.MIRROR_PROCESS_EVENTS === "1";
 const INCLUDE_APPROVAL_PARAMS = env.INCLUDE_APPROVAL_PARAMS === "1";
@@ -100,7 +103,7 @@ server.listen(BRIDGE_PORT, BRIDGE_HOST, () => {
 });
 
 function handleClientMessage(client, upstream, data) {
-  let text = data.toString();
+  const text = data.toString();
   const msg = parseJson(text);
 
   if (msg?.id !== undefined && seenClientResponses.has(requestKey(client, msg.id))) {
@@ -386,12 +389,17 @@ async function handleTelegramCallback(query) {
 }
 
 async function handleScreenOnlyCallback(query, command) {
-  await telegram("editMessageText", {
-    chat_id: query.message.chat?.id || TELEGRAM_CHAT_ID,
-    message_id: query.message.message_id,
-    text: screenOnlyCommandMessage(command),
-    reply_markup: { inline_keyboard: [] },
-  });
+  try {
+    await sendPtyControl({ action: "write", text: `${command}\r` });
+    await telegram("editMessageText", {
+      chat_id: query.message.chat?.id || TELEGRAM_CHAT_ID,
+      message_id: query.message.message_id,
+      text: `Sent to screen Codex CLI: ${command}`,
+      reply_markup: { inline_keyboard: [] },
+    });
+  } catch (error) {
+    await editTelegramApproval(query.message, `Failed to send input to screen Codex CLI: ${error.message}`);
+  }
 }
 
 function mapDecisionForMethod(method, decision) {
@@ -632,16 +640,17 @@ async function setupTelegramCommands() {
       { command: "start", description: "Show bridge help" },
       { command: "bridge_help", description: "Show bridge help" },
       { command: "bridge_status", description: "Show bridge connection status" },
-      { command: "model", description: "Codex: show model sync note" },
-      { command: "reasoning", description: "Codex: show reasoning sync note" },
-      { command: "approvals", description: "Codex: show approval sync note" },
-      { command: "status", description: "Codex: show session status" },
-      { command: "diff", description: "Codex: show current diff" },
-      { command: "review", description: "Codex: start review mode" },
-      { command: "compact", description: "Codex: compact context" },
+      { command: "help", description: "Type /help into screen Codex CLI" },
+      { command: "model", description: "Type /model into screen Codex CLI" },
+      { command: "reasoning", description: "Type /reasoning into screen Codex CLI" },
+      { command: "approvals", description: "Type /approvals into screen Codex CLI" },
+      { command: "status", description: "Type /status into screen Codex CLI" },
+      { command: "diff", description: "Type /diff into screen Codex CLI" },
+      { command: "review", description: "Type /review into screen Codex CLI" },
+      { command: "compact", description: "Type /compact into screen Codex CLI" },
       { command: "stop", description: "Codex: interrupt active turn" },
-      { command: "new", description: "Codex: show new-session sync note" },
-      { command: "resume", description: "Codex: show resume sync note" },
+      { command: "new", description: "Type /new into screen Codex CLI" },
+      { command: "resume", description: "Type /resume into screen Codex CLI" },
     ],
     scope: { type: "chat", chat_id: TELEGRAM_CHAT_ID },
   });
@@ -681,52 +690,41 @@ async function handleTelegramMessage(message) {
   }
 
   if (!text) return;
+  if (TELEGRAM_INPUT_MODE === "tui") {
+    await sendTextToScreenCli(text);
+    return;
+  }
   await injectTelegramText(text);
 }
 
 async function handleSlashCommand(text) {
-  const [command, ...args] = text.split(/\s+/);
-  const argument = args.join(" ").trim();
+  const [command] = text.split(/\s+/);
 
   switch (command) {
     case "/start":
-    case "/help":
     case "/bridge_help":
       await sendBridgeHelp();
       return;
     case "/bridge_status":
-    case "/status":
       await sendBridgeStatus();
-      return;
-    case "/model":
-      await handleModelCommand(argument);
-      return;
-    case "/resume":
-      await sendResumePicker();
       return;
     case "/stop":
       await stopActiveTurn();
       return;
-    case "/compact":
-      await compactActiveThread();
-      return;
-    case "/diff":
-      await sendCurrentDiff();
-      return;
+    case "/help":
+    case "/model":
     case "/reasoning":
-      await handleReasoningCommand(argument);
-      return;
     case "/approvals":
-      await handleApprovalPolicyCommand(argument);
-      return;
+    case "/status":
+    case "/diff":
     case "/review":
-      await startReview(argument);
-      return;
+    case "/compact":
     case "/new":
-      await startNewThread(argument);
+    case "/resume":
+      await sendSlashToScreenCli(text);
       return;
     default:
-      await sendTelegramText(`${command} is not implemented in the Telegram bridge yet. It was not sent as a normal Codex prompt.`);
+      await sendSlashToScreenCli(text);
   }
 }
 
@@ -747,9 +745,8 @@ async function sendBridgeHelp() {
       "/bridge_help - show this help",
       "/bridge_status - show bridge status",
       "",
-      "Synced commands handled by this bridge: /status, /diff, /review, /compact and /stop.",
-      "Screen-local commands such as /model, /reasoning, /approvals, /new and /resume must be run in the screen Codex CLI.",
-      "Unsupported slash commands are not sent as normal prompts.",
+      "Codex slash commands from Telegram are typed into the screen Codex CLI through the PTY driver, so screen-local state stays synchronized.",
+      "Use /stop for bridge-level turn interrupt. Use /bridge_status for bridge diagnostics.",
     ].join("\n"),
   });
 }
@@ -790,38 +787,12 @@ async function sendBridgeStatus() {
       `config model: ${config?.model || "(default)"}`,
       `config reasoning: ${config?.model_reasoning_effort || "(default)"}`,
       `config approvals: ${formatApprovalPolicy(config?.approval_policy) || "(default)"}`,
-      "telegram overrides: disabled to keep Telegram and the screen CLI synchronized",
+      `telegram input mode: ${TELEGRAM_INPUT_MODE}`,
       `upstream: ${CODEX_UPSTREAM_WS}`,
       `bridge: ws://${BRIDGE_HOST}:${BRIDGE_PORT}`,
+      `pty control: ${PTY_CONTROL_HOST}:${PTY_CONTROL_PORT}`,
     ].join("\n"),
   });
-}
-
-async function sendScreenOnlyCommandNotice(command, argument = "") {
-  await sendTelegramText(screenOnlyCommandMessage(command, argument));
-}
-
-function screenOnlyCommandMessage(command, argument = "") {
-  const typed = argument ? `${command} ${argument}` : command;
-  return [
-    `${typed} was not applied from Telegram.`,
-    "",
-    "This command changes Codex CLI screen-local state. Codex CLI 0.130.0 does not expose a remote protocol for the bridge to run that slash command inside the connected TUI.",
-    "",
-    `Run ${typed} in the screen Codex CLI instead. Telegram will keep mirroring the active screen session and approvals.`,
-  ].join("\n");
-}
-
-async function handleModelCommand(argument) {
-  await sendScreenOnlyCommandNotice("/model", argument);
-}
-
-async function startNewThread(argument) {
-  await sendScreenOnlyCommandNotice("/new", argument);
-}
-
-async function sendResumePicker() {
-  await sendScreenOnlyCommandNotice("/resume");
 }
 
 async function stopActiveTurn() {
@@ -845,6 +816,55 @@ async function stopActiveTurn() {
   }
 
   await sendTelegramText("Stop request sent to Codex.");
+}
+
+async function sendSlashToScreenCli(text) {
+  await writeScreenCliInput(`${text}\r`, `Sent to screen Codex CLI: ${text}`);
+}
+
+async function sendTextToScreenCli(text) {
+  await writeScreenCliInput(`${text}\r`, `Sent to screen Codex CLI: ${text}`);
+}
+
+async function writeScreenCliInput(text, successMessage) {
+  try {
+    await sendPtyControl({ action: "write", text });
+    await sendTelegramText(successMessage);
+  } catch (error) {
+    await sendTelegramText(`Failed to send input to screen Codex CLI: ${error.message}`);
+  }
+}
+
+function sendPtyControl(payload, timeoutMs = 3000) {
+  const body = JSON.stringify(payload);
+  return new Promise((resolveRequest, rejectRequest) => {
+    const socket = netConnect({ host: PTY_CONTROL_HOST, port: PTY_CONTROL_PORT });
+    const chunks = [];
+    const timer = setTimeout(() => {
+      socket.destroy();
+      rejectRequest(new Error(`PTY control timed out at ${PTY_CONTROL_HOST}:${PTY_CONTROL_PORT}`));
+    }, timeoutMs);
+
+    socket.once("connect", () => {
+      socket.end(body);
+    });
+    socket.on("data", (chunk) => chunks.push(chunk));
+    socket.once("end", () => {
+      clearTimeout(timer);
+      const text = Buffer.concat(chunks).toString("utf8").trim();
+      try {
+        const response = JSON.parse(text || "{}");
+        if (!response.ok) throw new Error(response.error || "PTY control request failed");
+        resolveRequest(response);
+      } catch (error) {
+        rejectRequest(error);
+      }
+    });
+    socket.once("error", (error) => {
+      clearTimeout(timer);
+      rejectRequest(error);
+    });
+  });
 }
 
 async function compactActiveThread() {

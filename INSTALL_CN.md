@@ -8,10 +8,11 @@
 
 ```bash
 node --version
+python3 --version
 codex --version
 ```
 
-建议 Node.js 版本为 22 或更高。然后下载项目并安装命令：
+建议 Node.js 版本为 22 或更高。Python 3 用于 PTY driver。然后下载项目并安装命令：
 
 ```bash
 git clone https://github.com/zhangxiaohan810/codex-cli-telegram.git
@@ -130,6 +131,9 @@ TELEGRAM_CHAT_ID=123456789
 CODEX_UPSTREAM_WS=ws://127.0.0.1:8765
 BRIDGE_HOST=127.0.0.1
 BRIDGE_PORT=8766
+PTY_CONTROL_HOST=127.0.0.1
+PTY_CONTROL_PORT=8767
+TELEGRAM_INPUT_MODE=tui
 MIRROR_AGENT_MESSAGES=1
 MIRROR_PROCESS_EVENTS=0
 INCLUDE_APPROVAL_PARAMS=0
@@ -151,33 +155,27 @@ codex-telegram
 
 1. 启动 `codex app-server`，默认地址是 `ws://127.0.0.1:8765`
 2. 启动 `codex-telegram-bridge`，默认地址是 `ws://127.0.0.1:8766`
-3. 打开 `codex --remote ws://127.0.0.1:8766`
+3. 通过 PTY driver 打开 `codex --remote ws://127.0.0.1:8766`
 
 启动成功后，你可以正常在 Codex CLI 里使用 Codex。Telegram bot 会收到 Codex 的输出和审批按钮。
 
 ### Telegram 命令同步说明
 
-Telegram 可以直接发送普通文字给当前屏幕里的 Codex session，也可以处理这些同步命令：
-
-```text
-/status
-/diff
-/review
-/compact
-/stop
-```
-
-下面这些命令属于 Codex CLI 屏幕本地状态，必须在终端里的 Codex CLI 输入：
+Telegram 发来的普通文字和 Codex slash 命令都会写入屏幕里的 Codex CLI，所以它等价于你在终端里输入。
 
 ```text
 /model
 /reasoning
 /approvals
+/status
+/diff
+/review
+/compact
 /new
 /resume
 ```
 
-原因是 Codex CLI 0.130.0 还没有提供“让 bridge 远程执行 TUI 里的 slash 命令并切换本地状态”的协议。如果 bridge 在 Telegram 里私自改模型、推理强度、权限模式或 session，会造成 Telegram 和终端屏幕看到的状态不同步，所以新版会拒绝这种 Telegram-only 修改。
+`/stop` 保留为 bridge 层的中断命令，用来打断当前 Codex turn。`/bridge_status` 用来看 bridge 连接状态。其它 `/` 命令会通过 PTY driver 输入到屏幕 Codex CLI，不再创建 Telegram-only 状态。
 
 如果你在服务器 SSH 里使用，建议用 `tmux` 防止断连：
 

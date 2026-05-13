@@ -14,6 +14,9 @@ const upstreamUrl = new URL(env.CODEX_UPSTREAM_WS || "ws://127.0.0.1:8765");
 const bridgeHost = env.BRIDGE_HOST || "127.0.0.1";
 const bridgePort = Number(env.BRIDGE_PORT || 8766);
 const bridgeUrl = `ws://${bridgeHost}:${bridgePort}`;
+const ptyControlHost = env.PTY_CONTROL_HOST || "127.0.0.1";
+const ptyControlPort = Number(env.PTY_CONTROL_PORT || 8767);
+const pythonBin = env.PYTHON_BIN || "python3";
 
 mkdirSync(logsDir, { recursive: true });
 
@@ -37,9 +40,23 @@ await ensureListening({
 });
 
 console.log(`[codex-telegram] starting Codex CLI: ${codexBin} --remote ${bridgeUrl}`);
-const cli = spawn(codexBin, ["--remote", bridgeUrl, ...process.argv.slice(2)], {
+const cli = spawn(pythonBin, [
+  resolve(projectRoot, "scripts/codex_pty_driver.py"),
+  "--control-host",
+  ptyControlHost,
+  "--control-port",
+  String(ptyControlPort),
+  codexBin,
+  "--remote",
+  bridgeUrl,
+  ...process.argv.slice(2),
+], {
   stdio: "inherit",
-  env,
+  env: {
+    ...env,
+    PTY_CONTROL_HOST: ptyControlHost,
+    PTY_CONTROL_PORT: String(ptyControlPort),
+  },
 });
 
 cli.on("exit", (code, signal) => {
