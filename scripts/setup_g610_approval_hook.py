@@ -26,6 +26,16 @@ ENV_KEYS = {
 }
 
 
+def default_env_file() -> Path:
+    cwd_env = Path.cwd() / ".env"
+    if cwd_env.exists():
+        return cwd_env
+    nested_env = Path.cwd() / "codex-cli-telegram" / ".env"
+    if nested_env.exists():
+        return nested_env
+    return ROOT / ".env"
+
+
 def run(args: list[str], *, input_text: str | None = None) -> None:
     subprocess.run(args, input=input_text, text=True, check=True)
 
@@ -293,13 +303,13 @@ def main() -> int:
     parser.add_argument("--mac-python", default=None, help="Python with hidapi on the Mac")
     parser.add_argument("--mac-dir", default=None, help="Install directory on the Mac")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT, help="Local controller TCP port")
-    parser.add_argument("--env-file", default=str(ROOT / ".env"), help="Bridge .env path")
+    parser.add_argument("--env-file", default=None, help="Bridge .env path")
     parser.add_argument("--test", action="store_true", help="Run a 5-second blink test after setup")
     parser.add_argument("--no-test", action="store_true", help="Skip the post-setup blink test prompt")
     parser.add_argument("--input-mapping", choices=["ask", "yes", "no"], default="ask", help="Install macOS keyboard/mouse mapping templates")
     args = parser.parse_args()
 
-    env_file = Path(args.env_file)
+    env_file = Path(args.env_file) if args.env_file else default_env_file()
     existing = load_env(env_file)
 
     mode = args.mode or existing.get("G610_USAGE_MODE") or ask_choice("Use the G610 on this machine or over SSH?", ["local", "ssh"], "ssh")

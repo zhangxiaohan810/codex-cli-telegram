@@ -17,6 +17,16 @@ ENV_KEYS = {
 }
 
 
+def default_env_file() -> Path:
+    cwd_env = Path.cwd() / ".env"
+    if cwd_env.exists():
+        return cwd_env
+    nested_env = Path.cwd() / "codex-cli-telegram" / ".env"
+    if nested_env.exists():
+        return nested_env
+    return ROOT / ".env"
+
+
 def ask_choice(prompt: str, choices: list[str], default: str) -> str:
     labels = "/".join(f"{choice}{'*' if choice == default else ''}" for choice in choices)
     while True:
@@ -105,10 +115,10 @@ def main() -> int:
     parser.add_argument("--telegram-token", help="Telegram bot token")
     parser.add_argument("--telegram-chat-id", help="Telegram chat id")
     parser.add_argument("--g610-args", default="", help="Extra args passed to codex-g610-setup when keyboard is enabled")
-    parser.add_argument("--env-file", default=str(ROOT / ".env"), help="Bridge .env path")
+    parser.add_argument("--env-file", default=None, help="Bridge .env path")
     args = parser.parse_args()
 
-    env_file = Path(args.env_file)
+    env_file = Path(args.env_file) if args.env_file else default_env_file()
     existing = load_env(env_file)
 
     channel = args.channel or existing.get("NOTIFICATION_CHANNEL") or ask_choice("Approval notification method?", ["telegram", "keyboard", "both"], "both")
@@ -122,7 +132,7 @@ def main() -> int:
         values["TELEGRAM_CHAT_ID"] = chat_id
 
     update_env(env_file, values)
-    print(f"Updated {args.env_file} notification channel: {channel}")
+    print(f"Updated {env_file} notification channel: {channel}")
 
     if channel in {"keyboard", "both"}:
         command = ["python", str(ROOT / "scripts" / "setup_g610_approval_hook.py"), "--env-file", str(env_file)]
