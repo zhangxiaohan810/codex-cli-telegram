@@ -311,7 +311,7 @@ def main() -> int:
     parser.add_argument("--env-file", default=None, help="Bridge .env path")
     parser.add_argument("--test", action="store_true", help="Run a 5-second blink test after setup")
     parser.add_argument("--no-test", action="store_true", help="Skip the post-setup blink test prompt")
-    parser.add_argument("--input-mapping", choices=["ask", "yes", "no"], default="ask", help="Install macOS keyboard/mouse mapping templates")
+    parser.add_argument("--input-mapping", choices=["ask", "yes", "no"], default="ask", help="Install macOS keyboard mapping and Karabiner mouse-wheel configuration")
     args = parser.parse_args()
 
     env_file = Path(args.env_file) if args.env_file else default_env_file()

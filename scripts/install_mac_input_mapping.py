@@ -9,10 +9,156 @@ from __future__ import annotations
 
 import argparse
 import json
+import plistlib
+import subprocess
 from pathlib import Path
 
 
 DEFAULT_KEYS = ["c", "v", "b", "z", "s", "a", "x", "f", "p", "n", "w", "t"]
+APPLE_VENDOR_ID = 0x05AC
+
+
+def detect_pointing_devices_hid() -> list[dict[str, object]]:
+    try:
+        import hid  # type: ignore
+    except Exception:
+        return []
+
+    devices: list[dict[str, object]] = []
+    seen: set[tuple[int, int]] = set()
+
+    for device in hid.enumerate():
+        if device.get("usage_page") != 0x1 or device.get("usage") != 0x2:
+            continue
+        vendor_id = int(device.get("vendor_id") or 0)
+        product_id = int(device.get("product_id") or 0)
+        if not vendor_id or not product_id or vendor_id == APPLE_VENDOR_ID:
+            continue
+        key = (vendor_id, product_id)
+        if key in seen:
+            continue
+        seen.add(key)
+        devices.append(
+            {
+                "vendor_id": vendor_id,
+                "product_id": product_id,
+                "manufacturer": device.get("manufacturer_string") or "",
+                "product": device.get("product_string") or "",
+            }
+        )
+
+    return devices
+
+
+def detect_pointing_devices_ioreg() -> list[dict[str, object]]:
+    try:
+        result = subprocess.run(
+            ["ioreg", "-a", "-r", "-c", "IOHIDDevice"],
+            capture_output=True,
+            check=True,
+        )
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        return []
+
+    try:
+        records = plistlib.loads(result.stdout)
+    except Exception:
+        return []
+
+    devices: list[dict[str, object]] = []
+    seen: set[tuple[int, int]] = set()
+
+    for record in records:
+        usage_page = int(record.get("PrimaryUsagePage") or 0)
+        usage = int(record.get("PrimaryUsage") or 0)
+        vendor_id = int(record.get("VendorID") or 0)
+        product_id = int(record.get("ProductID") or 0)
+        transport = str(record.get("Transport") or "")
+        if usage_page != 0x1 or usage != 0x2:
+            continue
+        if not vendor_id or not product_id or vendor_id == APPLE_VENDOR_ID:
+            continue
+        if transport and transport not in {"USB", "Bluetooth"}:
+            continue
+        key = (vendor_id, product_id)
+        if key in seen:
+            continue
+        seen.add(key)
+        devices.append(
+            {
+                "vendor_id": vendor_id,
+                "product_id": product_id,
+                "manufacturer": str(record.get("Manufacturer") or ""),
+                "product": str(record.get("Product") or ""),
+            }
+        )
+
+    return devices
+
+
+def detect_pointing_devices() -> list[dict[str, object]]:
+    devices = detect_pointing_devices_hid()
+    if devices:
+        return devices
+    return detect_pointing_devices_ioreg()
+
+
+def find_selected_profile(data: dict) -> dict:
+    profiles = data.setdefault("profiles", [])
+    if not profiles:
+        raise RuntimeError("Karabiner config has no profiles.")
+    for profile in profiles:
+        if profile.get("selected"):
+            return profile
+    return profiles[0]
+
+
+def configure_karabiner_mouse_flip(devices: list[dict[str, object]]) -> tuple[Path, list[dict[str, object]]]:
+    config_path = Path.home() / ".config" / "karabiner" / "karabiner.json"
+    if not config_path.exists():
+        return config_path, []
+
+    original = config_path.read_text()
+    data = json.loads(original)
+    profile = find_selected_profile(data)
+    profile_devices = profile.setdefault("devices", [])
+    updated: list[dict[str, object]] = []
+
+    for target in devices:
+        vendor_id = int(target["vendor_id"])
+        product_id = int(target["product_id"])
+        match = None
+        for device in profile_devices:
+            identifiers = device.get("identifiers", {})
+            if (
+                identifiers.get("vendor_id") == vendor_id
+                and identifiers.get("product_id") == product_id
+                and identifiers.get("is_pointing_device") is True
+            ):
+                match = device
+                break
+        if match is None:
+            match = {
+                "identifiers": {
+                    "vendor_id": vendor_id,
+                    "product_id": product_id,
+                    "is_keyboard": False,
+                    "is_pointing_device": True,
+                }
+            }
+            profile_devices.append(match)
+
+        match["mouse_flip_vertical_wheel"] = True
+        match.setdefault("mouse_flip_horizontal_wheel", False)
+        match.setdefault("mouse_swap_wheels", False)
+        updated.append(target)
+
+    backup_path = config_path.with_name("karabiner.json.codex-backup")
+    if not backup_path.exists():
+        backup_path.write_text(original)
+
+    config_path.write_text(json.dumps(data, indent=2) + "\n")
+    return config_path, updated
 
 
 SERVICE_SOURCE = r"""#!/usr/bin/env python3
@@ -45,109 +191,16 @@ KEYCODES = {
 
 CONFIG = Path.home() / ".codex-g610" / "mapping.json"
 STATE = {"enabled": True}
-SYNTHETIC_SCROLL_TAG = 0x434F444558474631
 
 
 def load_config() -> dict:
     data = json.loads(CONFIG.read_text())
     keyboard = data.get("keyboard", {})
-    mouse = data.get("mouse", {})
     keys = {KEYCODES[k]: k for k in keyboard.get("keys", []) if k in KEYCODES}
-    return {
-        "keys": keys,
-        "reverse_scroll": bool(mouse.get("reverse_scroll", True)),
-        "discrete_only": bool(mouse.get("reverse_scroll_discrete_only", True)),
-    }
+    return {"keys": keys}
 
 
 CFG = load_config()
-
-
-def should_flip_scroll(event) -> bool:
-    if not CFG["reverse_scroll"]:
-        return False
-    if not CFG["discrete_only"]:
-        return True
-    return not bool(
-        Quartz.CGEventGetIntegerValueField(
-            event, Quartz.kCGScrollWheelEventIsContinuous
-        )
-    )
-
-
-def get_scroll_value(event, field) -> int:
-    if not hasattr(Quartz, field):
-        return 0
-    return int(Quartz.CGEventGetIntegerValueField(event, getattr(Quartz, field)))
-
-
-def is_synthetic_scroll_event(event) -> bool:
-    if not hasattr(Quartz, "kCGEventSourceUserData"):
-        return False
-    return (
-        Quartz.CGEventGetIntegerValueField(event, Quartz.kCGEventSourceUserData)
-        == SYNTHETIC_SCROLL_TAG
-    )
-
-
-def build_reversed_scroll_event(event):
-    line_v = -get_scroll_value(event, "kCGScrollWheelEventDeltaAxis1")
-    line_h = -get_scroll_value(event, "kCGScrollWheelEventDeltaAxis2")
-    fixed_v = -get_scroll_value(event, "kCGScrollWheelEventFixedPtDeltaAxis1")
-    fixed_h = -get_scroll_value(event, "kCGScrollWheelEventFixedPtDeltaAxis2")
-    point_v = -get_scroll_value(event, "kCGScrollWheelEventPointDeltaAxis1")
-    point_h = -get_scroll_value(event, "kCGScrollWheelEventPointDeltaAxis2")
-    is_continuous = bool(
-        get_scroll_value(event, "kCGScrollWheelEventIsContinuous")
-    )
-
-    units = (
-        Quartz.kCGScrollEventUnitPixel
-        if is_continuous
-        else Quartz.kCGScrollEventUnitLine
-    )
-    primary = point_v if is_continuous and point_v else line_v
-    secondary = point_h if is_continuous and point_h else line_h
-    wheel_count = 2 if secondary else 1
-
-    new_event = Quartz.CGEventCreateScrollWheelEvent(
-        None, units, wheel_count, primary, secondary
-    )
-    if new_event is None:
-        return None
-
-    if hasattr(Quartz, "CGEventSetLocation") and hasattr(Quartz, "CGEventGetLocation"):
-        Quartz.CGEventSetLocation(new_event, Quartz.CGEventGetLocation(event))
-    if hasattr(Quartz, "CGEventSetTimestamp") and hasattr(Quartz, "CGEventGetTimestamp"):
-        Quartz.CGEventSetTimestamp(new_event, Quartz.CGEventGetTimestamp(event))
-    Quartz.CGEventSetFlags(new_event, Quartz.CGEventGetFlags(event))
-
-    if hasattr(Quartz, "kCGEventSourceUserData"):
-        Quartz.CGEventSetIntegerValueField(
-            new_event, Quartz.kCGEventSourceUserData, SYNTHETIC_SCROLL_TAG
-        )
-
-    if hasattr(Quartz, "kCGScrollWheelEventIsContinuous"):
-        Quartz.CGEventSetIntegerValueField(
-            new_event,
-            Quartz.kCGScrollWheelEventIsContinuous,
-            1 if is_continuous else 0,
-        )
-
-    for field, value in (
-        ("kCGScrollWheelEventDeltaAxis1", line_v),
-        ("kCGScrollWheelEventDeltaAxis2", line_h),
-        ("kCGScrollWheelEventFixedPtDeltaAxis1", fixed_v),
-        ("kCGScrollWheelEventFixedPtDeltaAxis2", fixed_h),
-        ("kCGScrollWheelEventPointDeltaAxis1", point_v),
-        ("kCGScrollWheelEventPointDeltaAxis2", point_h),
-    ):
-        if value and hasattr(Quartz, field):
-            Quartz.CGEventSetIntegerValueField(
-                new_event, getattr(Quartz, field), value
-            )
-
-    return new_event
 
 
 def emit_command_key(keycode: int, is_down: bool) -> None:
@@ -160,9 +213,6 @@ def callback(_proxy, event_type, event, _refcon):
     if not STATE["enabled"]:
         return event
 
-    if event_type == Quartz.kCGEventScrollWheel and is_synthetic_scroll_event(event):
-        return event
-
     if event_type in (Quartz.kCGEventKeyDown, Quartz.kCGEventKeyUp):
         flags = Quartz.CGEventGetFlags(event)
         keycode = Quartz.CGEventGetIntegerValueField(
@@ -171,12 +221,6 @@ def callback(_proxy, event_type, event, _refcon):
         if flags & Quartz.kCGEventFlagMaskControl and keycode in CFG["keys"]:
             emit_command_key(keycode, event_type == Quartz.kCGEventKeyDown)
             return None
-
-    if event_type == Quartz.kCGEventScrollWheel and should_flip_scroll(event):
-        new_event = build_reversed_scroll_event(event)
-        if new_event is None:
-            return event
-        return new_event
 
     return event
 
@@ -192,7 +236,6 @@ def main() -> int:
     mask = (
         Quartz.CGEventMaskBit(Quartz.kCGEventKeyDown)
         | Quartz.CGEventMaskBit(Quartz.kCGEventKeyUp)
-        | Quartz.CGEventMaskBit(Quartz.kCGEventScrollWheel)
     )
     tap = Quartz.CGEventTapCreate(
         Quartz.kCGSessionEventTap,
@@ -294,8 +337,8 @@ README = """Codex G610 local input mapper
 
 What it does:
 - Maps external keyboard Ctrl+C/V/B/Z/S/A/X/F/P/N/W/T to Command+...
-- Reverses discrete mouse wheel direction by default
-- Uses a macOS event tap instead of Karabiner/LinearMouse
+- Uses a macOS event tap for keyboard mapping only
+- Mouse wheel reversal is configured through Karabiner when available
 
 Start:
   ~/bin/codex-mac-input-start
@@ -310,7 +353,7 @@ Permissions required:
 - Input Monitoring
 - Accessibility
 
-Edit mapping.json to customize the mapping logic.
+Edit mapping.json to customize keyboard mapping logic.
 """
 
 
@@ -338,11 +381,6 @@ def main() -> int:
                     "default": "Map external keyboard Ctrl+keys to Command+keys.",
                     "keys": DEFAULT_KEYS,
                 },
-                "mouse": {
-                    "default": "Reverse external mouse wheel direction.",
-                    "reverse_scroll": True,
-                    "reverse_scroll_discrete_only": True,
-                },
             },
             indent=2,
         )
@@ -359,6 +397,8 @@ def main() -> int:
     stop_path.chmod(0o755)
     status_path.chmod(0o755)
 
+    karabiner_path, karabiner_devices = configure_karabiner_mouse_flip(detect_pointing_devices())
+
     print("Installed macOS local input mapper:")
     print(f"  {mapping_path}")
     print(f"  {service_path}")
@@ -367,6 +407,20 @@ def main() -> int:
     print("  ~/bin/codex-mac-input-start")
     print("  ~/bin/codex-mac-input-stop")
     print("  ~/bin/codex-mac-input-status")
+    if karabiner_devices:
+        print("Configured Karabiner mouse wheel flip for:")
+        for device in karabiner_devices:
+            label = f'{device.get("manufacturer", "").strip()} {device.get("product", "").strip()}'.strip()
+            print(
+                f'  {label or "Unknown device"} '
+                f'(vid=0x{int(device["vendor_id"]):04x}, pid=0x{int(device["product_id"]):04x})'
+            )
+        print(f"Karabiner config updated: {karabiner_path}")
+        print("Restart Karabiner-Elements or reload its profile to apply mouse wheel changes.")
+    else:
+        print("Karabiner mouse wheel flip was not configured automatically.")
+        print(f"Expected config file: {karabiner_path}")
+        print("If Karabiner-Elements is installed, make sure karabiner.json exists and rerun this installer.")
     return 0
 
 
