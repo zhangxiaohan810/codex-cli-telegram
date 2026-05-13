@@ -15,6 +15,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_PORT = 19610
+LAUNCHD_LABEL = "com.codex.g610.blink-server"
 ENV_KEYS = {
     "G610_USAGE_MODE",
     "G610_LOCAL_OS",
@@ -222,6 +223,78 @@ fi
 """
 
 
+def make_mac_launchd_plist(mac_python: str, server_remote: str) -> str:
+    return f"""<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>{LAUNCHD_LABEL}</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>{mac_python}</string>
+    <string>{server_remote}</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>/var/log/codex-g610-blink-server.log</string>
+  <key>StandardErrorPath</key>
+  <string>/var/log/codex-g610-blink-server.log</string>
+</dict>
+</plist>
+"""
+
+
+def make_mac_autostart_install_script(mac_dir: str) -> str:
+    plist_source = f"{mac_dir.rstrip('/')}/com.codex.g610.blink-server.plist"
+    plist_target = f"/Library/LaunchDaemons/{LAUNCHD_LABEL}.plist"
+    return f"""#!/usr/bin/env bash
+set -euo pipefail
+
+SOURCE={shlex.quote(plist_source)}
+TARGET={shlex.quote(plist_target)}
+
+if [ ! -f "$SOURCE" ]; then
+  echo "missing plist: $SOURCE" >&2
+  exit 1
+fi
+
+sudo launchctl bootout system/{LAUNCHD_LABEL} >/dev/null 2>&1 || true
+sudo cp "$SOURCE" "$TARGET"
+sudo chown root:wheel "$TARGET"
+sudo chmod 644 "$TARGET"
+sudo launchctl bootstrap system "$TARGET"
+sudo launchctl enable system/{LAUNCHD_LABEL}
+sudo launchctl kickstart -k system/{LAUNCHD_LABEL}
+echo "installed launchd daemon: {LAUNCHD_LABEL}"
+"""
+
+
+def make_mac_autostart_uninstall_script() -> str:
+    plist_target = f"/Library/LaunchDaemons/{LAUNCHD_LABEL}.plist"
+    return f"""#!/usr/bin/env bash
+set -euo pipefail
+
+TARGET={shlex.quote(plist_target)}
+
+sudo launchctl bootout system/{LAUNCHD_LABEL} >/dev/null 2>&1 || true
+sudo launchctl disable system/{LAUNCHD_LABEL} >/dev/null 2>&1 || true
+sudo rm -f "$TARGET"
+echo "removed launchd daemon: {LAUNCHD_LABEL}"
+"""
+
+
+def make_mac_autostart_status_script() -> str:
+    return f"""#!/usr/bin/env bash
+set -euo pipefail
+
+sudo launchctl print system/{LAUNCHD_LABEL} 2>/dev/null || echo "not loaded"
+"""
+
+
 def install_local_macos(env_file: Path, mac_python: str, port: int) -> tuple[str, str]:
     server_path = ROOT / "scripts" / "g610_blink_server.py"
     start_cmd = f"printf start | nc 127.0.0.1 {port}"
@@ -249,12 +322,17 @@ def install_local_macos(env_file: Path, mac_python: str, port: int) -> tuple[str
 def install_ssh_macos(env_file: Path, mac_host: str, mac_user: str, mac_python: str, mac_dir: str, port: int) -> tuple[str, str]:
     server_source = ROOT / "scripts" / "g610_blink_server.py"
     server_remote = f"{mac_dir.rstrip('/')}/g610_blink_server.py"
+    launchd_remote = f"{mac_dir.rstrip('/')}/{LAUNCHD_LABEL}.plist"
 
     ssh(mac_user, mac_host, f"mkdir -p {shlex.quote(mac_dir)} ~/bin")
     upload_text(mac_user, mac_host, server_remote, server_source.read_text())
+    upload_text(mac_user, mac_host, launchd_remote, make_mac_launchd_plist(mac_python, server_remote))
     upload_home_bin(mac_user, mac_host, "codex-g610-server-start", make_mac_server_start_script(mac_python, server_remote))
     upload_home_bin(mac_user, mac_host, "codex-g610-server-stop", make_mac_server_stop_script(port))
     upload_home_bin(mac_user, mac_host, "codex-g610-server-status", make_mac_server_status_script(port))
+    upload_home_bin(mac_user, mac_host, "codex-g610-autostart-install", make_mac_autostart_install_script(mac_dir))
+    upload_home_bin(mac_user, mac_host, "codex-g610-autostart-uninstall", make_mac_autostart_uninstall_script())
+    upload_home_bin(mac_user, mac_host, "codex-g610-autostart-status", make_mac_autostart_status_script())
 
     start_cmd = f"ssh -o BatchMode=yes -o ConnectTimeout=5 {mac_user}@{mac_host} 'printf start | nc 127.0.0.1 {port}'"
     stop_cmd = f"ssh -o BatchMode=yes -o ConnectTimeout=5 {mac_user}@{mac_host} 'printf stop | nc 127.0.0.1 {port}'"
@@ -275,10 +353,16 @@ def install_ssh_macos(env_file: Path, mac_host: str, mac_user: str, mac_python: 
     print("  ~/bin/codex-g610-server-start")
     print("  ~/bin/codex-g610-server-stop")
     print("  ~/bin/codex-g610-server-status")
+    print("  ~/bin/codex-g610-autostart-install")
+    print("  ~/bin/codex-g610-autostart-uninstall")
+    print("  ~/bin/codex-g610-autostart-status")
     print(f"Updated {env_file}")
     print()
     print("Run this once from a local Mac Terminal:")
     print("  ~/bin/codex-g610-server-start")
+    print()
+    print("To install login/boot autostart on the Mac:")
+    print("  ~/bin/codex-g610-autostart-install")
     print()
     print("Then test from this machine:")
     print("  ./scripts/test_g610_approval_hook.sh 5")
