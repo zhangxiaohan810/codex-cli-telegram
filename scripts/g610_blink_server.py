@@ -93,14 +93,22 @@ class G610Controller:
             self.device.write(pad(COMMIT))
 
     def blink_loop(self) -> None:
+        next_tick = time.monotonic()
+        on = True
         while not self.stopped.is_set():
             if not self.blinking.is_set():
-                time.sleep(0.05)
+                on = True
+                next_tick = time.monotonic()
+                time.sleep(0.01)
                 continue
-            self.write_state(ON)
-            time.sleep(HALF_PERIOD_SECONDS)
-            self.write_state(OFF)
-            time.sleep(HALF_PERIOD_SECONDS)
+            self.write_state(ON if on else OFF)
+            on = not on
+            next_tick += HALF_PERIOD_SECONDS
+            delay = next_tick - time.monotonic()
+            if delay > 0:
+                time.sleep(delay)
+            else:
+                next_tick = time.monotonic()
 
     def start(self) -> None:
         self.blinking.set()

@@ -89,11 +89,17 @@ def main() -> int:
     device.open_path(keyboard["path"])
 
     try:
+        next_tick = time.monotonic()
+        on = True
         while not stop:
-            write_state(device, ON)
-            time.sleep(HALF_PERIOD_SECONDS)
-            write_state(device, OFF)
-            time.sleep(HALF_PERIOD_SECONDS)
+            write_state(device, ON if on else OFF)
+            on = not on
+            next_tick += HALF_PERIOD_SECONDS
+            delay = next_tick - time.monotonic()
+            if delay > 0:
+                time.sleep(delay)
+            else:
+                next_tick = time.monotonic()
         write_state(device, OFF)
     finally:
         device.close()
