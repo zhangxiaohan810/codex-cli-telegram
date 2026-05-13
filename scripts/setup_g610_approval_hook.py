@@ -8,6 +8,7 @@ import os
 import platform
 import shlex
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -118,7 +119,9 @@ def run_shell(command: str) -> subprocess.CompletedProcess[str]:
 
 
 def install_mac_input_mapping_local() -> None:
-    run(["python", str(ROOT / "scripts" / "install_mac_input_mapping.py")])
+    run([sys.executable, str(ROOT / "scripts" / "install_mac_input_mapping.py")])
+    print("Run this once from a local Mac Terminal:")
+    print("  ~/bin/codex-mac-input-start")
 
 
 def install_mac_input_mapping_ssh(mac_user: str, mac_host: str, mac_dir: str, mac_python: str) -> None:
@@ -126,6 +129,8 @@ def install_mac_input_mapping_ssh(mac_user: str, mac_host: str, mac_dir: str, ma
     remote = f"{mac_dir.rstrip('/')}/install_mac_input_mapping.py"
     upload_text(mac_user, mac_host, remote, source.read_text())
     ssh(mac_user, mac_host, f"{shlex.quote(mac_python)} {shlex.quote(remote)}")
+    print("Run this once from a local Mac Terminal:")
+    print("  ~/bin/codex-mac-input-start")
 
 
 def run_blink_test(start_cmd: str, stop_cmd: str, seconds: int = 5) -> bool:

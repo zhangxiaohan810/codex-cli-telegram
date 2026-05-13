@@ -140,7 +140,7 @@ codex-g610-setup
 
 It asks whether the bridge runs locally or over SSH, then asks whether the computer with the G610 is macOS or Windows. The currently implemented path is macOS. Windows is detected but not configured yet.
 After setup, it offers a 5-second blink test. You can force or skip that prompt with `--test` or `--no-test`.
-On macOS it also asks whether to install optional keyboard/mouse mapping templates. The default keyboard template maps external G610 `Ctrl+C/V/B/Z/S/...` to `Command+C/V/B/Z/S/...` through Karabiner-Elements. The mouse template documents per-device reverse wheel scrolling through LinearMouse, so the trackpad is not changed.
+On macOS it also asks whether to install an optional local keyboard/mouse mapper. That mapper runs as a separate Mac event-tap process, so it does not compete with the G610 HID lighting controller. The default behavior maps `Ctrl+C/V/B/Z/S/...` to `Command+C/V/B/Z/S/...` and reverses discrete wheel scrolling.
 
 For the verified server-to-Mac setup:
 
