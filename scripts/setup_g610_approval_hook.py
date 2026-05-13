@@ -121,11 +121,11 @@ def install_mac_input_mapping_local() -> None:
     run(["python", str(ROOT / "scripts" / "install_mac_input_mapping.py")])
 
 
-def install_mac_input_mapping_ssh(mac_user: str, mac_host: str, mac_dir: str) -> None:
+def install_mac_input_mapping_ssh(mac_user: str, mac_host: str, mac_dir: str, mac_python: str) -> None:
     source = ROOT / "scripts" / "install_mac_input_mapping.py"
     remote = f"{mac_dir.rstrip('/')}/install_mac_input_mapping.py"
     upload_text(mac_user, mac_host, remote, source.read_text())
-    ssh(mac_user, mac_host, f"python {shlex.quote(remote)}")
+    ssh(mac_user, mac_host, f"{shlex.quote(mac_python)} {shlex.quote(remote)}")
 
 
 def run_blink_test(start_cmd: str, stop_cmd: str, seconds: int = 5) -> bool:
@@ -334,7 +334,7 @@ def main() -> int:
     mac_dir = args.mac_dir or ask_text("Install directory on Mac", "/Users/Tiezhu/Downloads/codex-g610")
     start_cmd, stop_cmd = install_ssh_macos(env_file, mac_host, mac_user, mac_python, mac_dir, args.port)
     if args.input_mapping == "yes" or (args.input_mapping == "ask" and ask_yes_no("Install optional Mac keyboard/mouse mapping templates on the Mac?", False)):
-        install_mac_input_mapping_ssh(mac_user, mac_host, mac_dir)
+        install_mac_input_mapping_ssh(mac_user, mac_host, mac_dir, mac_python)
     should_test = args.test or (not args.no_test and ask_yes_no("Run 5-second blink test now?", True))
     if should_test:
         ok = run_blink_test(start_cmd, stop_cmd)

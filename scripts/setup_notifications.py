@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import subprocess
+import sys
 from pathlib import Path
 
 
@@ -135,7 +136,7 @@ def main() -> int:
     print(f"Updated {env_file} notification channel: {channel}")
 
     if channel in {"keyboard", "both"}:
-        command = ["python", str(ROOT / "scripts" / "setup_g610_approval_hook.py"), "--env-file", str(env_file)]
+        command = [sys.executable, str(ROOT / "scripts" / "setup_g610_approval_hook.py"), "--env-file", str(env_file)]
         if args.g610_args:
             command.extend(args.g610_args.split())
         subprocess.run(command, check=True)
