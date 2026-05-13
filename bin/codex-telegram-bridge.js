@@ -40,6 +40,8 @@ const streamedItems = new Set();
 const fileChangePatches = new Map();
 const resumePickerSelections = new Map();
 const modelPickerSelections = new Map();
+const effortPickerSelections = new Map();
+const REASONING_EFFORTS = ["none", "minimal", "low", "medium", "high", "xhigh"];
 let activeClient = null;
 let activeThreadId = null;
 let activeTurnId = null;
@@ -383,6 +385,16 @@ async function handleTelegramCallback(query) {
     return;
   }
 
+  if (data.startsWith("ep:")) {
+    await handleEffortPickerCallback(query, data);
+    return;
+  }
+
+  if (data === "ep_cancel") {
+    await handleEffortPickerCancel(query);
+    return;
+  }
+
   const parts = data.split(":");
   if (parts.length !== 3 || parts[0] !== "a") return;
 
@@ -474,9 +486,12 @@ async function handleModelPickerCallback(query, data) {
         "Selected model on screen Codex CLI.",
         "",
         formatModelButton(selection.model),
+        "",
+        "Now choose reasoning effort.",
       ].join("\n"),
       reply_markup: { inline_keyboard: [] },
     });
+    await sendEffortPickerToTelegram(selection.model);
   } catch (error) {
     await editTelegramApproval(query.message, `Failed to select model: ${error.message}`);
   }
@@ -490,6 +505,45 @@ async function handleModelPickerCancel(query) {
     chat_id: query.message.chat?.id || TELEGRAM_CHAT_ID,
     message_id: query.message.message_id,
     text: "Cancelled model picker.",
+    reply_markup: { inline_keyboard: [] },
+  });
+}
+
+async function handleEffortPickerCallback(query, data) {
+  const token = data.slice(3);
+  const selection = effortPickerSelections.get(token);
+  if (!selection) {
+    await editTelegramApproval(query.message, "Reasoning effort selection expired.");
+    return;
+  }
+
+  try {
+    await sendPtyControl({ action: "submit", text: selection.effort });
+    effortPickerSelections.delete(token);
+    await telegram("editMessageText", {
+      chat_id: query.message.chat?.id || TELEGRAM_CHAT_ID,
+      message_id: query.message.message_id,
+      text: [
+        "Selected reasoning effort on screen Codex CLI.",
+        "",
+        `model: ${selection.model?.model || "(selected)"}`,
+        `effort: ${selection.effort}`,
+      ].join("\n"),
+      reply_markup: { inline_keyboard: [] },
+    });
+  } catch (error) {
+    await editTelegramApproval(query.message, `Failed to select reasoning effort: ${error.message}`);
+  }
+}
+
+async function handleEffortPickerCancel(query) {
+  try {
+    await sendPtyControl({ action: "write", text: "\x1b" });
+  } catch {}
+  await telegram("editMessageText", {
+    chat_id: query.message.chat?.id || TELEGRAM_CHAT_ID,
+    message_id: query.message.message_id,
+    text: "Cancelled reasoning effort picker.",
     reply_markup: { inline_keyboard: [] },
   });
 }
@@ -989,6 +1043,26 @@ async function sendModelPickerToTelegram() {
       "",
       "Tap a model to search and select it in the screen Codex CLI picker.",
     ].join("\n"),
+    reply_markup: { inline_keyboard: buttons },
+  });
+}
+
+async function sendEffortPickerToTelegram(model) {
+  const buttons = REASONING_EFFORTS.map((effort) => {
+    const token = shortApprovalToken(`${model?.model || ""}:${effort}:${Date.now()}:${Math.random()}`).slice(0, 16);
+    effortPickerSelections.set(token, { effort, model, createdAt: Date.now() });
+    return [{ text: effort, callback_data: `ep:${token}` }];
+  });
+  buttons.push([{ text: "Cancel", callback_data: "ep_cancel" }]);
+
+  await sendTelegramMessage({
+    chat_id: TELEGRAM_CHAT_ID,
+    text: [
+      "Choose reasoning effort",
+      "",
+      model?.model ? `model: ${model.model}` : "",
+      "Tap an effort to select it in the screen Codex CLI picker.",
+    ].filter(Boolean).join("\n"),
     reply_markup: { inline_keyboard: buttons },
   });
 }
