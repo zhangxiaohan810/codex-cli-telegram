@@ -116,6 +116,10 @@ def build_reversed_scroll_event(event):
     if new_event is None:
         return None
 
+    if hasattr(Quartz, "CGEventSetLocation") and hasattr(Quartz, "CGEventGetLocation"):
+        Quartz.CGEventSetLocation(new_event, Quartz.CGEventGetLocation(event))
+    if hasattr(Quartz, "CGEventSetTimestamp") and hasattr(Quartz, "CGEventGetTimestamp"):
+        Quartz.CGEventSetTimestamp(new_event, Quartz.CGEventGetTimestamp(event))
     Quartz.CGEventSetFlags(new_event, Quartz.CGEventGetFlags(event))
 
     if hasattr(Quartz, "kCGEventSourceUserData"):
@@ -172,8 +176,7 @@ def callback(_proxy, event_type, event, _refcon):
         new_event = build_reversed_scroll_event(event)
         if new_event is None:
             return event
-        Quartz.CGEventPost(Quartz.kCGHIDEventTap, new_event)
-        return None
+        return new_event
 
     return event
 
