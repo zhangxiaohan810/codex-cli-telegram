@@ -5,7 +5,11 @@
   "type": "module",
   "bin": {
     "codex-telegram": "./bin/codex-telegram.js",
-    "codex-telegram-bridge": "./bin/codex-telegram-bridge.js"
+    "codex-telegram-bridge": "./bin/codex-telegram-bridge.js",
+    "codex-notify-setup": "./scripts/setup_notifications.py",
+    "codex-g610-setup": "./scripts/setup_g610_approval_hook.py",
+    "codex-g610-test": "./scripts/test_g610_approval_hook.sh",
+    "codex-mac-input-mapping": "./scripts/install_mac_input_mapping.py"
   },
   "scripts": {
     "start": "node ./bin/codex-telegram-bridge.js",

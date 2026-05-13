@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { createHash, randomBytes } from "node:crypto";
+import { spawn } from "node:child_process";
 import { createServer } from "node:http";
 import { request as httpsRequest } from "node:https";
 import { connect as netConnect } from "node:net";
@@ -11,8 +12,10 @@ import { URL } from "node:url";
 
 const env = loadEnv();
 
+const NOTIFICATION_CHANNEL = env.NOTIFICATION_CHANNEL || "telegram";
 const TELEGRAM_BOT_TOKEN = env.TELEGRAM_BOT_TOKEN;
 const TELEGRAM_CHAT_ID = env.TELEGRAM_CHAT_ID;
+const TELEGRAM_ENABLED = ["telegram", "both"].includes(NOTIFICATION_CHANNEL);
 const CODEX_UPSTREAM_WS = env.CODEX_UPSTREAM_WS || "ws://127.0.0.1:8765";
 const BRIDGE_HOST = env.BRIDGE_HOST || "127.0.0.1";
 const BRIDGE_PORT = Number(env.BRIDGE_PORT || 8766);
@@ -23,11 +26,13 @@ const MIRROR_AGENT_MESSAGES = env.MIRROR_AGENT_MESSAGES !== "0";
 const MIRROR_PROCESS_EVENTS = env.MIRROR_PROCESS_EVENTS === "1";
 const INCLUDE_APPROVAL_PARAMS = env.INCLUDE_APPROVAL_PARAMS === "1";
 const BRIDGE_DEBUG_RPC = env.BRIDGE_DEBUG_RPC === "1";
+const APPROVAL_REQUEST_START_CMD = expandEnvVars(env.APPROVAL_REQUEST_START_CMD || "", env);
+const APPROVAL_REQUEST_STOP_CMD = expandEnvVars(env.APPROVAL_REQUEST_STOP_CMD || "", env);
 const TELEGRAM_PROXY = env.TELEGRAM_PROXY || env.HTTPS_PROXY || env.HTTP_PROXY || "";
 const TELEGRAM_CODE_LIMIT = 2500;
 const TELEGRAM_RETRIES = Number(env.TELEGRAM_RETRIES || 2);
 const TELEGRAM_SAFE_MESSAGE_LIMIT = Number(env.TELEGRAM_SAFE_MESSAGE_LIMIT || 3800);
-if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) {
+if (TELEGRAM_ENABLED && (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID)) {
   fatal("TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID are required. Copy .env.example to .env first.");
 }
 
@@ -49,14 +54,17 @@ let activeCwd = null;
 let requestSeq = 10_000;
 let telegramOffset = 0;
 let telegramMessageQueue = Promise.resolve();
+let approvalHookProcess = null;
 
-setupTelegramCommands().catch((error) => {
-  console.error("[telegram] failed to set command menu:", error.message);
-});
+if (TELEGRAM_ENABLED) {
+  setupTelegramCommands().catch((error) => {
+    console.error("[telegram] failed to set command menu:", error.message);
+  });
 
-startTelegramPolling().catch((error) => {
-  console.error("[telegram] polling stopped:", error);
-});
+  startTelegramPolling().catch((error) => {
+    console.error("[telegram] polling stopped:", error);
+  });
+}
 
 const server = createServer();
 server.on("upgrade", (req, socket, head) => {
@@ -95,6 +103,7 @@ server.on("upgrade", (req, socket, head) => {
 server.listen(BRIDGE_PORT, BRIDGE_HOST, () => {
   console.log(`[bridge] listening ws://${BRIDGE_HOST}:${BRIDGE_PORT}`);
   console.log(`[bridge] connect screen client with: codex --remote ws://${BRIDGE_HOST}:${BRIDGE_PORT}`);
+  console.log(`[bridge] notification channel=${NOTIFICATION_CHANNEL}`);
   if (TELEGRAM_PROXY) console.log(`[telegram] proxy=${TELEGRAM_PROXY}`);
 });
 
@@ -210,10 +219,13 @@ function registerApproval(client, upstream, msg) {
   };
 
   pendingApprovals.set(key, record);
+  syncApprovalHook();
   console.log(`[bridge] approval request method=${msg.method} id=${msg.id}`);
-  sendApprovalToTelegram(record).catch((error) => {
-    console.error("[telegram] failed to send approval:", error.message);
-  });
+  if (TELEGRAM_ENABLED) {
+    sendApprovalToTelegram(record).catch((error) => {
+      console.error("[telegram] failed to send approval:", error.message);
+    });
+  }
 }
 
 async function sendApprovalToTelegram(record) {
@@ -575,9 +587,61 @@ function markResolved(client, requestId, source) {
   record.resolved = true;
   seenClientResponses.add(key);
   pendingApprovals.delete(key);
+  syncApprovalHook();
 
   if (record.telegramMessageId && !source.startsWith("telegram:")) {
     editTelegramApproval({ chat: { id: TELEGRAM_CHAT_ID }, message_id: record.telegramMessageId }, `Resolved from ${source}.`).catch(() => {});
+  }
+}
+
+function syncApprovalHook() {
+  if (pendingApprovals.size > 0) {
+    startApprovalHook();
+  } else {
+    stopApprovalHook();
+  }
+}
+
+function startApprovalHook() {
+  if (!APPROVAL_REQUEST_START_CMD || approvalHookProcess) return;
+  approvalHookProcess = spawn(APPROVAL_REQUEST_START_CMD, {
+    shell: true,
+    stdio: "ignore",
+    detached: true,
+    env,
+  });
+  approvalHookProcess.unref();
+  approvalHookProcess.on("error", (error) => {
+    console.error("[bridge] approval start hook failed:", error.message);
+    approvalHookProcess = null;
+  });
+  approvalHookProcess.on("exit", (code, signal) => {
+    if (approvalHookProcess) console.log(`[bridge] approval start hook exited code=${code} signal=${signal}`);
+    approvalHookProcess = null;
+  });
+}
+
+function stopApprovalHook() {
+  if (approvalHookProcess) {
+    try {
+      process.kill(-approvalHookProcess.pid, "SIGTERM");
+    } catch (error) {
+      console.error("[bridge] failed to stop approval hook process:", error.message);
+    }
+    approvalHookProcess = null;
+  }
+
+  if (APPROVAL_REQUEST_STOP_CMD) {
+    const stopProcess = spawn(APPROVAL_REQUEST_STOP_CMD, {
+      shell: true,
+      stdio: "ignore",
+      detached: true,
+      env,
+    });
+    stopProcess.unref();
+    stopProcess.on("error", (error) => {
+      console.error("[bridge] approval stop hook failed:", error.message);
+    });
   }
 }
 
@@ -601,6 +665,8 @@ async function editTelegramApproval(message, suffix) {
 }
 
 function mirrorNotification(msg) {
+  if (!TELEGRAM_ENABLED) return;
+
   if (msg.method === "item/fileChange/patchUpdated") {
     fileChangePatches.set(msg.params?.itemId, msg.params || {});
     return;
@@ -745,6 +811,7 @@ function flushTelegramBuffer(key) {
 }
 
 function sendTelegramText(text) {
+  if (!TELEGRAM_ENABLED) return Promise.resolve();
   const payloads = splitTelegramHtmlMessage(text).map((chunk) => ({
     chat_id: TELEGRAM_CHAT_ID,
     text: chunk,
@@ -755,6 +822,7 @@ function sendTelegramText(text) {
 }
 
 function sendTelegramBlock(label, text) {
+  if (!TELEGRAM_ENABLED) return Promise.resolve();
   const chunks = splitTelegramBlock(label, text);
   const payloads = chunks.map((chunk, index) => {
     const suffix = chunks.length > 1 ? ` (${index + 1}/${chunks.length})` : "";
@@ -769,6 +837,7 @@ function sendTelegramBlock(label, text) {
 }
 
 function sendTelegramMessage(payload) {
+  if (!TELEGRAM_ENABLED) return Promise.resolve(null);
   return enqueueTelegramMessages([payload]).then((results) => results[0]);
 }
 
@@ -1528,6 +1597,11 @@ function sendUpstream(upstream, text) {
 }
 
 function closePair(client, upstream) {
+  for (const [key, record] of pendingApprovals.entries()) {
+    if (record.client === client) pendingApprovals.delete(key);
+  }
+  syncApprovalHook();
+
   if (client.open) client.socket.end();
   try {
     if (upstream.readyState === WebSocket.OPEN || upstream.readyState === WebSocket.CONNECTING) upstream.close();
@@ -1622,6 +1696,14 @@ function html(text) {
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
     .replace(/&lt;(\/?)(b|code|pre)&gt;/g, "<$1$2>");
+}
+
+process.once("SIGINT", shutdown);
+process.once("SIGTERM", shutdown);
+
+function shutdown(signal) {
+  stopApprovalHook();
+  process.kill(process.pid, signal);
 }
 
 function splitTelegramHtmlMessage(text) {
@@ -1766,6 +1848,13 @@ function loadEnv() {
     if (!(key in output)) output[key] = value;
   }
   return output;
+}
+
+function expandEnvVars(value, variables) {
+  return value.replace(/\$(\w+)|\$\{([^}]+)\}/g, (match, bareKey, bracedKey) => {
+    const key = bareKey || bracedKey;
+    return Object.prototype.hasOwnProperty.call(variables, key) ? variables[key] : match;
+  });
 }
 
 function fatal(message) {

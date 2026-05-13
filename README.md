@@ -44,6 +44,8 @@ Edit `.env`:
 ```bash
 TELEGRAM_BOT_TOKEN=your_botfather_token
 TELEGRAM_CHAT_ID=your_numeric_chat_id
+# Approval notification channel: telegram, keyboard, or both.
+NOTIFICATION_CHANNEL=telegram
 # Optional on macOS if `codex` is not in PATH:
 # CODEX_BIN=/Applications/Codex.app/Contents/Resources/codex
 CODEX_UPSTREAM_WS=ws://127.0.0.1:8765
@@ -57,6 +59,9 @@ MIRROR_PROCESS_EVENTS=0
 INCLUDE_APPROVAL_PARAMS=0
 # Optional: log bridge JSON-RPC requests/responses while debugging commands:
 BRIDGE_DEBUG_RPC=0
+# Optional: run a local command while a Codex approval request is pending:
+APPROVAL_REQUEST_START_CMD=
+APPROVAL_REQUEST_STOP_CMD=
 # Optional: retry transient Telegram API network failures such as ECONNRESET:
 TELEGRAM_RETRIES=2
 # Optional: conservative per-message HTML size budget for Telegram splitting:
@@ -114,6 +119,37 @@ python3 scripts/codex_pty_driver.py --control-host 127.0.0.1 --control-port 8767
 ```
 
 Now use Codex normally on screen. When Codex asks for approval, Telegram receives buttons too.
+
+## Approval Request Hook
+
+Run the notification installer to choose how approval requests reach you:
+
+```bash
+codex-notify-setup
+```
+
+It asks whether the communication method is Telegram, keyboard light, or both. Telegram writes `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID`; keyboard light delegates to `codex-g610-setup`.
+
+Set `APPROVAL_REQUEST_START_CMD` to run a local command while any Codex approval request is pending. The bridge starts it when the first approval arrives and stops it when all pending approvals are resolved. `APPROVAL_REQUEST_STOP_CMD` is optional and runs after the start process is stopped.
+
+For a Logitech G610, run the interactive installer:
+
+```bash
+codex-g610-setup
+```
+
+It asks whether the bridge runs locally or over SSH, then asks whether the computer with the G610 is macOS or Windows. The currently implemented path is macOS. Windows is detected but not configured yet.
+After setup, it offers a 5-second blink test. You can force or skip that prompt with `--test` or `--no-test`.
+On macOS it also asks whether to install optional keyboard/mouse mapping templates. The default keyboard template maps external G610 `Ctrl+C/V/B/Z/S/...` to `Command+C/V/B/Z/S/...` through Karabiner-Elements. The mouse template documents per-device reverse wheel scrolling through LinearMouse, so the trackpad is not changed.
+
+For the verified server-to-Mac setup:
+
+```bash
+python scripts/setup_g610_approval_hook.py --mode ssh --local-os mac --mac-host 10.7.166.81 --mac-user Tiezhu
+ssh-copy-id Tiezhu@10.7.166.81
+```
+
+Then start the Mac-side controller from a local Mac Terminal with `~/bin/codex-g610-server-start`, and test from the bridge machine with `codex-g610-test 5`.
 
 ## Run On A Headless Server
 
