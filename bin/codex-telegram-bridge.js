@@ -21,9 +21,9 @@ const MIRROR_PROCESS_EVENTS = env.MIRROR_PROCESS_EVENTS === "1";
 const INCLUDE_APPROVAL_PARAMS = env.INCLUDE_APPROVAL_PARAMS === "1";
 const BRIDGE_DEBUG_RPC = env.BRIDGE_DEBUG_RPC === "1";
 const TELEGRAM_PROXY = env.TELEGRAM_PROXY || env.HTTPS_PROXY || env.HTTP_PROXY || "";
-const TELEGRAM_MESSAGE_LIMIT = 3500;
 const TELEGRAM_CODE_LIMIT = 2500;
 const TELEGRAM_RETRIES = Number(env.TELEGRAM_RETRIES || 2);
+const TELEGRAM_SAFE_MESSAGE_LIMIT = Number(env.TELEGRAM_SAFE_MESSAGE_LIMIT || 3800);
 const REASONING_EFFORTS = ["none", "minimal", "low", "medium", "high", "xhigh"];
 const APPROVAL_POLICIES = ["untrusted", "on-failure", "on-request", "never"];
 const WS_CLOSE_POLICY_VIOLATION = 1008;
@@ -50,6 +50,7 @@ let currentEffort = null;
 let currentApprovalPolicy = null;
 let requestSeq = 10_000;
 let telegramOffset = 0;
+let telegramMessageQueue = Promise.resolve();
 
 setupTelegramCommands().catch((error) => {
   console.error("[telegram] failed to set command menu:", error.message);
@@ -251,7 +252,7 @@ async function sendApprovalToTelegram(record) {
 
   record.callbackPrefix = callbackPrefix;
 
-  const result = await telegram("sendMessage", {
+  const result = await sendTelegramMessage({
     chat_id: TELEGRAM_CHAT_ID,
     text,
     parse_mode: "HTML",
@@ -593,13 +594,13 @@ function mirrorCompletedTextItem(item) {
   if (!item?.id || streamedItems.has(item.id)) return;
 
   if (item.type === "agentMessage" && item.text) {
-    sendTelegramText(html(`<b>assistant</b>\n<pre>${truncate(item.text, TELEGRAM_MESSAGE_LIMIT)}</pre>`));
+    sendTelegramBlock("assistant", item.text);
     streamedItems.add(item.id);
     return;
   }
 
   if (item.type === "plan" && item.text) {
-    sendTelegramText(html(`<b>plan</b>\n<pre>${truncate(item.text, TELEGRAM_MESSAGE_LIMIT)}</pre>`));
+    sendTelegramBlock("plan", item.text);
     streamedItems.add(item.id);
     return;
   }
@@ -607,7 +608,7 @@ function mirrorCompletedTextItem(item) {
   if (item.type === "reasoning") {
     const text = [...(item.summary || []), ...(item.content || [])].filter(Boolean).join("\n");
     if (text) {
-      sendTelegramText(html(`<b>reasoning</b>\n<pre>${truncate(text, TELEGRAM_MESSAGE_LIMIT)}</pre>`));
+      sendTelegramBlock("reasoning", text);
       streamedItems.add(item.id);
     }
   }
@@ -693,19 +694,48 @@ function flushTelegramBuffer(key) {
   const text = buffer.text.trim();
   if (!text) return;
 
-  const chunks = splitTelegram(text, TELEGRAM_MESSAGE_LIMIT);
-  for (const chunk of chunks) {
-    sendTelegramText(html(`<b>${buffer.label}</b>\n<pre>${truncate(chunk, TELEGRAM_MESSAGE_LIMIT)}</pre>`));
-  }
+  sendTelegramBlock(buffer.label, text);
 }
 
 function sendTelegramText(text) {
-  return telegram("sendMessage", {
+  const payloads = splitTelegramHtmlMessage(text).map((chunk) => ({
     chat_id: TELEGRAM_CHAT_ID,
-    text,
+    text: chunk,
     parse_mode: "HTML",
     disable_web_page_preview: true,
-  }).catch((error) => console.error("[telegram] mirror failed:", error.message));
+  }));
+  return enqueueTelegramMessages(payloads).catch((error) => console.error("[telegram] mirror failed:", error.message));
+}
+
+function sendTelegramBlock(label, text) {
+  const chunks = splitTelegramBlock(label, text);
+  const payloads = chunks.map((chunk, index) => {
+    const suffix = chunks.length > 1 ? ` (${index + 1}/${chunks.length})` : "";
+    return {
+      chat_id: TELEGRAM_CHAT_ID,
+      text: html(`<b>${label}${suffix}</b>\n<pre>${chunk}</pre>`),
+      parse_mode: "HTML",
+      disable_web_page_preview: true,
+    };
+  });
+  return enqueueTelegramMessages(payloads).catch((error) => console.error("[telegram] mirror failed:", error.message));
+}
+
+function sendTelegramMessage(payload) {
+  return enqueueTelegramMessages([payload]).then((results) => results[0]);
+}
+
+function enqueueTelegramMessages(payloads) {
+  const previous = telegramMessageQueue;
+  const task = previous.then(async () => {
+    const results = [];
+    for (const payload of payloads) {
+      results.push(await telegram("sendMessage", payload));
+    }
+    return results;
+  });
+  telegramMessageQueue = task.catch(() => {});
+  return task;
 }
 
 async function setupTelegramCommands() {
@@ -817,7 +847,7 @@ function normalizeTelegramCommand(text) {
 }
 
 async function sendBridgeHelp() {
-  await telegram("sendMessage", {
+  await sendTelegramMessage({
     chat_id: TELEGRAM_CHAT_ID,
     text: [
       "Codex bridge is online.",
@@ -856,7 +886,7 @@ async function sendBridgeStatus() {
     if (!configResponse.error) config = configResponse.result?.config || null;
   }
 
-  await telegram("sendMessage", {
+  await sendTelegramMessage({
     chat_id: TELEGRAM_CHAT_ID,
     text: [
       "Codex status",
@@ -922,7 +952,7 @@ async function sendModelPicker() {
     return [{ text: `${model.isDefault ? "* " : ""}${model.displayName || model.model}`, callback_data: `m:${token}` }];
   });
 
-  await telegram("sendMessage", {
+  await sendTelegramMessage({
     chat_id: TELEGRAM_CHAT_ID,
     text: currentModel ? `Current bridge model override: ${currentModel}` : "Choose a Codex model for future turns:",
     reply_markup: { inline_keyboard: buttons },
@@ -990,7 +1020,7 @@ async function sendResumePicker() {
     return [{ text: formatThreadButton(thread), callback_data: `r:${token}` }];
   });
 
-  await telegram("sendMessage", {
+  await sendTelegramMessage({
     chat_id: TELEGRAM_CHAT_ID,
     text: "Choose a Codex thread to resume:",
     reply_markup: { inline_keyboard: buttons },
@@ -1064,11 +1094,11 @@ async function sendCurrentDiff() {
     return;
   }
 
-  await sendTelegramText(html(`<b>git diff${sha ? ` ${sha}` : ""}</b>\n<pre>${truncate(diff, TELEGRAM_CODE_LIMIT)}</pre>`));
+  await sendTelegramBlock(`git diff${sha ? ` ${sha}` : ""}`, diff);
 }
 
 async function sendReasoningPicker() {
-  await telegram("sendMessage", {
+  await sendTelegramMessage({
     chat_id: TELEGRAM_CHAT_ID,
     text: currentEffort ? `Current reasoning effort override: ${currentEffort}` : "Choose reasoning effort for future turns:",
     reply_markup: {
@@ -1092,7 +1122,7 @@ async function handleReasoningCommand(argument) {
 }
 
 async function sendApprovalPolicyPicker() {
-  await telegram("sendMessage", {
+  await sendTelegramMessage({
     chat_id: TELEGRAM_CHAT_ID,
     text: currentApprovalPolicy ? `Current approval policy override: ${currentApprovalPolicy}` : "Choose approval policy for future turns:",
     reply_markup: {
@@ -1575,10 +1605,71 @@ function html(text) {
     .replace(/&lt;(\/?)(b|code|pre)&gt;/g, "<$1$2>");
 }
 
-function splitTelegram(text, size) {
+function splitTelegramHtmlMessage(text) {
+  const value = String(text || "");
+  if (value.length <= TELEGRAM_SAFE_MESSAGE_LIMIT) return [value];
+
+  const plain = value.replace(/<\/?(b|code|pre)>/g, "");
+  const chunks = splitPlainTextByHtmlBudget(plain, (chunk, suffix) => html(`<pre>${suffix}${chunk}</pre>`).length);
+  return chunks.map((chunk, index) => {
+    const suffix = chunks.length > 1 ? `[${index + 1}/${chunks.length}]\n` : "";
+    return html(`<pre>${suffix}${chunk}</pre>`);
+  });
+}
+
+function splitTelegramBlock(label, text) {
+  return splitPlainTextByHtmlBudget(String(text || ""), (chunk, suffix) => {
+    return html(`<b>${label}${suffix}</b>\n<pre>${chunk}</pre>`).length;
+  });
+}
+
+function splitPlainTextByHtmlBudget(text, measure) {
+  if (!text) return [""];
   const chunks = [];
-  for (let i = 0; i < text.length; i += size) chunks.push(text.slice(i, i + size));
+  let remaining = text;
+  const suffixBudget = " (999/999)";
+
+  while (remaining.length) {
+    const size = fittingPrefixSize(remaining, (candidate) => measure(candidate, suffixBudget) <= TELEGRAM_SAFE_MESSAGE_LIMIT);
+    if (size >= remaining.length) {
+      chunks.push(remaining);
+      break;
+    }
+
+    const breakpoint = findReadableBreakpoint(remaining, size);
+    chunks.push(remaining.slice(0, breakpoint).trimEnd());
+    remaining = remaining.slice(breakpoint).trimStart();
+  }
+
   return chunks;
+}
+
+function fittingPrefixSize(text, fits) {
+  let low = 1;
+  let high = text.length;
+  let best = 1;
+
+  while (low <= high) {
+    const mid = Math.floor((low + high) / 2);
+    if (fits(text.slice(0, mid))) {
+      best = mid;
+      low = mid + 1;
+    } else {
+      high = mid - 1;
+    }
+  }
+
+  return best;
+}
+
+function findReadableBreakpoint(text, maxSize) {
+  const minSize = Math.floor(maxSize * 0.6);
+  const slice = text.slice(0, maxSize);
+  const newline = slice.lastIndexOf("\n");
+  if (newline >= minSize) return newline + 1;
+  const space = slice.lastIndexOf(" ");
+  if (space >= minSize) return space + 1;
+  return maxSize;
 }
 
 function truncate(text, size) {

@@ -55,6 +55,8 @@ INCLUDE_APPROVAL_PARAMS=0
 BRIDGE_DEBUG_RPC=0
 # Optional: retry transient Telegram API network failures such as ECONNRESET:
 TELEGRAM_RETRIES=2
+# Optional: conservative per-message HTML size budget for Telegram splitting:
+TELEGRAM_SAFE_MESSAGE_LIMIT=3800
 # If Telegram is blocked on your network, use your local proxy:
 TELEGRAM_PROXY=http://127.0.0.1:8888
 ```
