@@ -24,8 +24,6 @@ const TELEGRAM_PROXY = env.TELEGRAM_PROXY || env.HTTPS_PROXY || env.HTTP_PROXY |
 const TELEGRAM_CODE_LIMIT = 2500;
 const TELEGRAM_RETRIES = Number(env.TELEGRAM_RETRIES || 2);
 const TELEGRAM_SAFE_MESSAGE_LIMIT = Number(env.TELEGRAM_SAFE_MESSAGE_LIMIT || 3800);
-const REASONING_EFFORTS = ["none", "minimal", "low", "medium", "high", "xhigh"];
-const APPROVAL_POLICIES = ["untrusted", "on-failure", "on-request", "never"];
 const WS_CLOSE_POLICY_VIOLATION = 1008;
 
 if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) {
@@ -39,15 +37,10 @@ const seenClientResponses = new Set();
 const agentBuffers = new Map();
 const streamedItems = new Set();
 const fileChangePatches = new Map();
-const modelSelections = new Map();
-const resumeSelections = new Map();
 let activeClient = null;
 let activeThreadId = null;
 let activeTurnId = null;
 let activeCwd = null;
-let currentModel = null;
-let currentEffort = null;
-let currentApprovalPolicy = null;
 let requestSeq = 10_000;
 let telegramOffset = 0;
 let telegramMessageQueue = Promise.resolve();
@@ -113,16 +106,6 @@ function handleClientMessage(client, upstream, data) {
   if (msg?.id !== undefined && seenClientResponses.has(requestKey(client, msg.id))) {
     console.log(`[bridge] swallowed duplicate response id=${msg.id}`);
     return;
-  }
-
-  if (msg?.method === "turn/start") {
-    msg.params = withTurnOverrides(msg.params || {});
-    text = JSON.stringify(msg);
-  }
-
-  if (msg?.method === "thread/start" || msg?.method === "thread/resume") {
-    msg.params = withThreadOverrides(msg.params || {});
-    text = JSON.stringify(msg);
   }
 
   trackClientRequest(msg);
@@ -362,22 +345,22 @@ async function handleTelegramCallback(query) {
   if (data.startsWith("noop:")) return;
 
   if (data.startsWith("m:")) {
-    await handleModelCallback(query, data);
+    await handleScreenOnlyCallback(query, "/model");
     return;
   }
 
   if (data.startsWith("r:")) {
-    await handleResumeCallback(query, data);
+    await handleScreenOnlyCallback(query, "/resume");
     return;
   }
 
   if (data.startsWith("e:")) {
-    await handleEffortCallback(query, data);
+    await handleScreenOnlyCallback(query, "/reasoning");
     return;
   }
 
   if (data.startsWith("ap:")) {
-    await handleApprovalPolicyCallback(query, data);
+    await handleScreenOnlyCallback(query, "/approvals");
     return;
   }
 
@@ -402,111 +385,11 @@ async function handleTelegramCallback(query) {
   await editTelegramApproval(query.message, `Resolved from Telegram: ${decision}`);
 }
 
-async function handleModelCallback(query, data) {
-  const token = data.slice(2);
-  const model = modelSelections.get(token);
-  if (!model) {
-    await editTelegramApproval(query.message, "Model selection expired.");
-    return;
-  }
-
-  currentModel = model.model;
-  modelSelections.delete(token);
-
+async function handleScreenOnlyCallback(query, command) {
   await telegram("editMessageText", {
     chat_id: query.message.chat?.id || TELEGRAM_CHAT_ID,
     message_id: query.message.message_id,
-    text: [
-      `Selected Codex model: ${model.displayName || model.model}`,
-      "",
-      `The next new turn sent through this bridge will use ${model.model}.`,
-    ].filter(Boolean).join("\n"),
-    reply_markup: { inline_keyboard: [] },
-  });
-}
-
-async function handleResumeCallback(query, data) {
-  const token = data.slice(2);
-  const thread = resumeSelections.get(token);
-  if (!thread) {
-    await editTelegramApproval(query.message, "Thread selection expired.");
-    return;
-  }
-
-  const upstream = getActiveUpstream();
-  if (!upstream) {
-    await editTelegramApproval(query.message, "Codex upstream is not connected.");
-    return;
-  }
-  if (activeTurnId) {
-    await editTelegramApproval(query.message, "A Codex turn is running. Use /stop or wait for it to finish before /resume.");
-    return;
-  }
-
-  const response = await sendBridgeRequest(upstream, "thread/resume", withThreadOverrides({
-    threadId: thread.id,
-    excludeTurns: false,
-    persistExtendedHistory: false,
-  }));
-  if (response.error) {
-    await editTelegramApproval(query.message, `Resume failed: ${response.error.message || JSON.stringify(response.error)}`);
-    return;
-  }
-
-  updateRuntimeFromThreadResponse(response.result || {});
-  syncThreadToScreen(response.result || {});
-  activeThreadId = activeThreadId || thread.id;
-  activeCwd = activeCwd || thread.cwd;
-  resumeSelections.delete(token);
-
-  await telegram("editMessageText", {
-    chat_id: query.message.chat?.id || TELEGRAM_CHAT_ID,
-    message_id: query.message.message_id,
-    text: [
-      "Resumed Codex thread.",
-      "",
-      `thread: ${activeThreadId}`,
-      `cwd: ${activeCwd || "(unknown)"}`,
-      `model: ${currentModel || "(server default)"}`,
-      "",
-      "Telegram and the screen CLI were asked to use this thread.",
-    ].join("\n"),
-    reply_markup: { inline_keyboard: [] },
-  });
-}
-
-async function handleEffortCallback(query, data) {
-  const effort = data.slice(2);
-  if (!REASONING_EFFORTS.includes(effort)) {
-    await editTelegramApproval(query.message, "Unknown reasoning effort.");
-    return;
-  }
-
-  currentEffort = effort;
-  await telegram("editMessageText", {
-    chat_id: query.message.chat?.id || TELEGRAM_CHAT_ID,
-    message_id: query.message.message_id,
-    text: `Selected reasoning effort: ${effort}\n\nFuture turns through this bridge will use this effort.`,
-    reply_markup: { inline_keyboard: [] },
-  });
-}
-
-async function handleApprovalPolicyCallback(query, data) {
-  const policy = data.slice(3);
-  if (!APPROVAL_POLICIES.includes(policy)) {
-    await editTelegramApproval(query.message, "Unknown approval policy.");
-    return;
-  }
-
-  currentApprovalPolicy = policy;
-  await telegram("editMessageText", {
-    chat_id: query.message.chat?.id || TELEGRAM_CHAT_ID,
-    message_id: query.message.message_id,
-    text: [
-      `Selected approval policy: ${policy}`,
-      "",
-      "The next new turn sent through this bridge will use this policy.",
-    ].filter(Boolean).join("\n"),
+    text: screenOnlyCommandMessage(command),
     reply_markup: { inline_keyboard: [] },
   });
 }
@@ -749,16 +632,16 @@ async function setupTelegramCommands() {
       { command: "start", description: "Show bridge help" },
       { command: "bridge_help", description: "Show bridge help" },
       { command: "bridge_status", description: "Show bridge connection status" },
-      { command: "model", description: "Codex: change or show model" },
-      { command: "reasoning", description: "Codex: change reasoning effort" },
-      { command: "approvals", description: "Codex: change approval mode" },
+      { command: "model", description: "Codex: show model sync note" },
+      { command: "reasoning", description: "Codex: show reasoning sync note" },
+      { command: "approvals", description: "Codex: show approval sync note" },
       { command: "status", description: "Codex: show session status" },
       { command: "diff", description: "Codex: show current diff" },
       { command: "review", description: "Codex: start review mode" },
       { command: "compact", description: "Codex: compact context" },
       { command: "stop", description: "Codex: interrupt active turn" },
-      { command: "new", description: "Codex: start new thread if supported" },
-      { command: "resume", description: "Codex: resume thread if supported" },
+      { command: "new", description: "Codex: show new-session sync note" },
+      { command: "resume", description: "Codex: show resume sync note" },
     ],
     scope: { type: "chat", chat_id: TELEGRAM_CHAT_ID },
   });
@@ -864,7 +747,8 @@ async function sendBridgeHelp() {
       "/bridge_help - show this help",
       "/bridge_status - show bridge status",
       "",
-      "Codex commands are handled by this bridge when supported: /model, /reasoning, /approvals, /status, /diff, /review, /compact, /stop and /resume.",
+      "Synced commands handled by this bridge: /status, /diff, /review, /compact and /stop.",
+      "Screen-local commands such as /model, /reasoning, /approvals, /new and /resume must be run in the screen Codex CLI.",
       "Unsupported slash commands are not sent as normal prompts.",
     ].join("\n"),
   });
@@ -906,135 +790,38 @@ async function sendBridgeStatus() {
       `config model: ${config?.model || "(default)"}`,
       `config reasoning: ${config?.model_reasoning_effort || "(default)"}`,
       `config approvals: ${formatApprovalPolicy(config?.approval_policy) || "(default)"}`,
-      `next turn model: ${currentModel || config?.model || "(default)"}`,
-      `next turn reasoning: ${currentEffort || config?.model_reasoning_effort || "(default)"}`,
-      `next turn approvals: ${formatApprovalPolicy(currentApprovalPolicy || config?.approval_policy) || "(default)"}`,
-      `model override: ${currentModel || "(none)"}`,
-      `reasoning effort override: ${currentEffort || "(none)"}`,
-      `approval policy override: ${formatApprovalPolicy(currentApprovalPolicy) || "(none)"}`,
+      "telegram overrides: disabled to keep Telegram and the screen CLI synchronized",
       `upstream: ${CODEX_UPSTREAM_WS}`,
       `bridge: ws://${BRIDGE_HOST}:${BRIDGE_PORT}`,
     ].join("\n"),
   });
 }
 
-async function handleModelCommand(argument) {
-  if (!argument) {
-    await sendModelPicker();
-    return;
-  }
-
-  currentModel = argument;
-  await sendTelegramText([
-    `Selected Codex model: ${currentModel}`,
-    "",
-    "The next new turn sent through this bridge will use this model.",
-  ].filter(Boolean).join("\n"));
+async function sendScreenOnlyCommandNotice(command, argument = "") {
+  await sendTelegramText(screenOnlyCommandMessage(command, argument));
 }
 
-async function sendModelPicker() {
-  const upstream = getActiveUpstream();
-  if (!upstream) {
-    await sendTelegramText("Codex upstream is not connected. Start Codex with codex-telegram first.");
-    return;
-  }
+function screenOnlyCommandMessage(command, argument = "") {
+  const typed = argument ? `${command} ${argument}` : command;
+  return [
+    `${typed} was not applied from Telegram.`,
+    "",
+    "This command changes Codex CLI screen-local state. Codex CLI 0.130.0 does not expose a remote protocol for the bridge to run that slash command inside the connected TUI.",
+    "",
+    `Run ${typed} in the screen Codex CLI instead. Telegram will keep mirroring the active screen session and approvals.`,
+  ].join("\n");
+}
 
-  const response = await sendBridgeRequest(upstream, "model/list", { includeHidden: false, limit: 30 });
-  if (response.error) {
-    await sendTelegramText(`Failed to load models: ${response.error.message || JSON.stringify(response.error)}`);
-    return;
-  }
-
-  const models = response.result?.data || [];
-  if (!models.length) {
-    await sendTelegramText("No Codex models returned by app-server.");
-    return;
-  }
-
-  const buttons = models.slice(0, 20).map((model) => {
-    const token = shortApprovalToken(`${model.model}:${Date.now()}:${Math.random()}`).slice(0, 16);
-    modelSelections.set(token, model);
-    return [{ text: `${model.isDefault ? "* " : ""}${model.displayName || model.model}`, callback_data: `m:${token}` }];
-  });
-
-  await sendTelegramMessage({
-    chat_id: TELEGRAM_CHAT_ID,
-    text: currentModel ? `Current bridge model override: ${currentModel}` : "Choose a Codex model for future turns:",
-    reply_markup: { inline_keyboard: buttons },
-  });
+async function handleModelCommand(argument) {
+  await sendScreenOnlyCommandNotice("/model", argument);
 }
 
 async function startNewThread(argument) {
-  const upstream = getActiveUpstream();
-  if (!upstream) {
-    await sendTelegramText("Codex upstream is not connected. Start Codex with codex-telegram first.");
-    return;
-  }
-  if (activeTurnId) {
-    await sendTelegramText("A Codex turn is running. Use /stop or wait for it to finish before /new.");
-    return;
-  }
-
-  const params = withThreadOverrides({
-    ...(activeCwd ? { cwd: activeCwd } : {}),
-    experimentalRawEvents: false,
-    persistExtendedHistory: false,
-  });
-  const response = await sendBridgeRequest(upstream, "thread/start", params);
-  if (response.error) {
-    await sendTelegramText(`Failed to start new thread: ${response.error.message || JSON.stringify(response.error)}`);
-    return;
-  }
-
-  updateRuntimeFromThreadResponse(response.result || {});
-  syncThreadToScreen(response.result || {});
-  await sendTelegramText([
-    "Started a new Codex thread.",
-    "",
-    `thread: ${activeThreadId || "(unknown)"}`,
-    `cwd: ${activeCwd || "(unknown)"}`,
-    `model: ${currentModel || "(server default)"}`,
-    argument ? "" : "Telegram and the screen CLI were asked to use this thread.",
-  ].filter(Boolean).join("\n"));
-
-  if (argument) await injectTelegramText(argument);
+  await sendScreenOnlyCommandNotice("/new", argument);
 }
 
 async function sendResumePicker() {
-  const upstream = getActiveUpstream();
-  if (!upstream) {
-    await sendTelegramText("Codex upstream is not connected. Start Codex with codex-telegram first.");
-    return;
-  }
-
-  const response = await sendBridgeRequest(upstream, "thread/list", {
-    limit: 10,
-    sortKey: "updated_at",
-    sortDirection: "desc",
-    archived: false,
-  });
-  if (response.error) {
-    await sendTelegramText(`Failed to load threads: ${response.error.message || JSON.stringify(response.error)}`);
-    return;
-  }
-
-  const threads = response.result?.data || [];
-  if (!threads.length) {
-    await sendTelegramText("No Codex threads found.");
-    return;
-  }
-
-  const buttons = threads.map((thread) => {
-    const token = shortApprovalToken(`${thread.id}:${Date.now()}:${Math.random()}`).slice(0, 16);
-    resumeSelections.set(token, thread);
-    return [{ text: formatThreadButton(thread), callback_data: `r:${token}` }];
-  });
-
-  await sendTelegramMessage({
-    chat_id: TELEGRAM_CHAT_ID,
-    text: "Choose a Codex thread to resume:",
-    reply_markup: { inline_keyboard: buttons },
-  });
+  await sendScreenOnlyCommandNotice("/resume");
 }
 
 async function stopActiveTurn() {
@@ -1107,56 +894,12 @@ async function sendCurrentDiff() {
   await sendTelegramBlock(`git diff${sha ? ` ${sha}` : ""}`, diff);
 }
 
-async function sendReasoningPicker() {
-  await sendTelegramMessage({
-    chat_id: TELEGRAM_CHAT_ID,
-    text: currentEffort ? `Current reasoning effort override: ${currentEffort}` : "Choose reasoning effort for future turns:",
-    reply_markup: {
-      inline_keyboard: REASONING_EFFORTS.map((effort) => [{ text: effort, callback_data: `e:${effort}` }]),
-    },
-  });
-}
-
 async function handleReasoningCommand(argument) {
-  if (!argument) {
-    await sendReasoningPicker();
-    return;
-  }
-  if (!REASONING_EFFORTS.includes(argument)) {
-    await sendTelegramText(`Unknown reasoning effort: ${argument}\nUse one of: ${REASONING_EFFORTS.join(", ")}`);
-    return;
-  }
-
-  currentEffort = argument;
-  await sendTelegramText(`Selected reasoning effort: ${currentEffort}\n\nFuture turns through this bridge will use this effort.`);
-}
-
-async function sendApprovalPolicyPicker() {
-  await sendTelegramMessage({
-    chat_id: TELEGRAM_CHAT_ID,
-    text: currentApprovalPolicy ? `Current approval policy override: ${currentApprovalPolicy}` : "Choose approval policy for future turns:",
-    reply_markup: {
-      inline_keyboard: APPROVAL_POLICIES.map((policy) => [{ text: policy, callback_data: `ap:${policy}` }]),
-    },
-  });
+  await sendScreenOnlyCommandNotice("/reasoning", argument);
 }
 
 async function handleApprovalPolicyCommand(argument) {
-  if (!argument) {
-    await sendApprovalPolicyPicker();
-    return;
-  }
-  if (!APPROVAL_POLICIES.includes(argument)) {
-    await sendTelegramText(`Unknown approval policy: ${argument}\nUse one of: ${APPROVAL_POLICIES.join(", ")}`);
-    return;
-  }
-
-  currentApprovalPolicy = argument;
-  await sendTelegramText([
-    `Selected approval policy: ${currentApprovalPolicy}`,
-    "",
-    "The next new turn sent through this bridge will use this policy.",
-  ].filter(Boolean).join("\n"));
+  await sendScreenOnlyCommandNotice("/approvals", argument);
 }
 
 async function startReview(argument) {
@@ -1219,51 +962,6 @@ function sendBridgeRequest(upstream, method, params) {
   });
 }
 
-function updateRuntimeFromThreadResponse(result) {
-  activeThreadId = result.thread?.id || activeThreadId;
-  activeCwd = result.cwd || result.thread?.cwd || activeCwd;
-  currentModel = result.model || currentModel;
-  currentEffort = result.reasoningEffort || currentEffort;
-  currentApprovalPolicy = result.approvalPolicy || currentApprovalPolicy;
-}
-
-function syncThreadToScreen(result) {
-  if (!activeClient?.open || !result?.thread?.id) return;
-
-  const started = {
-    method: "thread/started",
-    params: { thread: result.thread },
-  };
-  const status = {
-    method: "thread/status/changed",
-    params: {
-      threadId: result.thread.id,
-      status: result.thread.status || { type: "idle" },
-    },
-  };
-
-  activeClient.sendText(JSON.stringify(started));
-  activeClient.sendText(JSON.stringify(status));
-  console.log(`[bridge] synced screen client to thread=${result.thread.id}`);
-}
-
-function withThreadOverrides(params) {
-  return {
-    ...params,
-    ...(currentModel ? { model: currentModel } : {}),
-    ...(currentApprovalPolicy ? { approvalPolicy: currentApprovalPolicy } : {}),
-  };
-}
-
-function withTurnOverrides(params) {
-  return {
-    ...params,
-    ...(currentModel ? { model: currentModel } : {}),
-    ...(currentEffort ? { effort: currentEffort } : {}),
-    ...(currentApprovalPolicy ? { approvalPolicy: currentApprovalPolicy } : {}),
-  };
-}
-
 async function injectTelegramText(text) {
   if (!activeClient) {
     await sendTelegramText("No active Codex CLI client is connected. Start it with: codex --remote ws://127.0.0.1:8766");
@@ -1301,7 +999,6 @@ async function injectTelegramText(text) {
         params: {
           threadId: activeThreadId,
           input,
-          ...withTurnOverrides({}),
         },
       };
 

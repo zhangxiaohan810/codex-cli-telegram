@@ -10,7 +10,7 @@ Chinese installation guide: [INSTALL_CN.md](./INSTALL_CN.md)
 - Mirrors Codex approval requests to Telegram with inline buttons.
 - Lets Telegram answer command and file-change approvals with `accept`, `acceptForSession`, `decline`, or `cancel`.
 - Mirrors assistant text deltas to Telegram in small batches.
-- Registers Telegram slash-command suggestions. Supported Codex commands are handled by the bridge so they are not sent as normal prompt text.
+- Registers Telegram slash-command suggestions. Synced commands are handled by the bridge so they are not sent as normal prompt text.
 
 This bridge uses Codex's local app-server JSON-RPC protocol. It does not scrape terminal text or simulate keyboard input.
 
@@ -190,19 +190,26 @@ Bridge-local commands:
 Supported Codex commands:
 
 ```text
-/model
-/reasoning
-/approvals
 /status
 /diff
 /review
 /compact
 /stop
-/resume
 ```
 
 Unsupported slash commands are rejected by the bridge instead of being sent as normal prompts.
-`/new` and `/resume` create or restore an app-server thread, then send thread switch notifications to the connected screen CLI so Telegram and the terminal stay on the same thread. If a turn is running, wait for it to finish or use `/stop` first.
+
+Screen-local commands must be run in the screen Codex CLI, not from Telegram:
+
+```text
+/model
+/reasoning
+/approvals
+/new
+/resume
+```
+
+Codex CLI 0.130.0 does not expose a remote protocol for the bridge to execute those slash commands inside the connected TUI. The bridge deliberately does not apply Telegram-only model, reasoning, approval, new-thread, or resume-thread overrides because that would make Telegram and the terminal use different state.
 
 For debugging command routing, set `BRIDGE_DEBUG_RPC=1` in `.env` and restart `codex-telegram-bridge`.
 
