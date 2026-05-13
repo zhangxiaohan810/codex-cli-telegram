@@ -383,6 +383,10 @@ def default_mac_python() -> str:
     return "/Users/Tiezhu/miniforge3/bin/python"
 
 
+def default_mac_install_dir(mac_user: str) -> str:
+    return f"/Users/{mac_user}/.codex-g610/server"
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--mode", choices=["local", "ssh"], help="Where the bridge runs relative to the keyboard computer")
@@ -420,7 +424,7 @@ def main() -> int:
 
     mac_host = args.mac_host or existing.get("MAC_HOST") or ask_text("Mac host/IP")
     mac_user = args.mac_user or existing.get("MAC_SSH_USER") or ask_text("Mac SSH user", os.environ.get("USER", "Tiezhu"))
-    mac_dir = args.mac_dir or ask_text("Install directory on Mac", "/Users/Tiezhu/Downloads/codex-g610")
+    mac_dir = args.mac_dir or ask_text("Install directory on Mac", default_mac_install_dir(mac_user))
     start_cmd, stop_cmd = install_ssh_macos(env_file, mac_host, mac_user, mac_python, mac_dir, args.port)
     if args.input_mapping == "yes" or (args.input_mapping == "ask" and ask_yes_no("Install optional Mac keyboard/mouse mapping templates on the Mac?", False)):
         install_mac_input_mapping_ssh(mac_user, mac_host, mac_dir, mac_python)
