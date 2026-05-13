@@ -38,6 +38,7 @@ const seenClientResponses = new Set();
 const agentBuffers = new Map();
 const streamedItems = new Set();
 const fileChangePatches = new Map();
+const resumePickerSelections = new Map();
 let activeClient = null;
 let activeThreadId = null;
 let activeTurnId = null;
@@ -361,6 +362,16 @@ async function handleTelegramCallback(query) {
     return;
   }
 
+  if (data.startsWith("rp:")) {
+    await handleResumePickerCallback(query, data);
+    return;
+  }
+
+  if (data === "rp_cancel") {
+    await handleResumePickerCancel(query);
+    return;
+  }
+
   const parts = data.split(":");
   if (parts.length !== 3 || parts[0] !== "a") return;
 
@@ -394,6 +405,49 @@ async function handleScreenOnlyCallback(query, command) {
   } catch (error) {
     await editTelegramApproval(query.message, `Failed to send input to screen Codex CLI: ${error.message}`);
   }
+}
+
+async function handleResumePickerCallback(query, data) {
+  const token = data.slice(3);
+  const selection = resumePickerSelections.get(token);
+  if (!selection) {
+    await editTelegramApproval(query.message, "Resume selection expired.");
+    return;
+  }
+
+  try {
+    await sendPtyControl({ action: "write", text: pickerSelectSequence(selection.index) });
+    resumePickerSelections.delete(token);
+    await telegram("editMessageText", {
+      chat_id: query.message.chat?.id || TELEGRAM_CHAT_ID,
+      message_id: query.message.message_id,
+      text: [
+        "Selected resume session on screen Codex CLI.",
+        "",
+        formatThreadButton(selection.thread),
+      ].join("\n"),
+      reply_markup: { inline_keyboard: [] },
+    });
+  } catch (error) {
+    await editTelegramApproval(query.message, `Failed to select resume session: ${error.message}`);
+  }
+}
+
+async function handleResumePickerCancel(query) {
+  try {
+    await sendPtyControl({ action: "write", text: "\x1b" });
+  } catch {}
+  await telegram("editMessageText", {
+    chat_id: query.message.chat?.id || TELEGRAM_CHAT_ID,
+    message_id: query.message.message_id,
+    text: "Cancelled resume picker.",
+    reply_markup: { inline_keyboard: [] },
+  });
+}
+
+function pickerSelectSequence(index) {
+  const down = "\x1b[B";
+  return `${down.repeat(Math.max(0, index))}\r`;
 }
 
 function mapDecisionForMethod(method, decision) {
@@ -714,8 +768,10 @@ async function handleSlashCommand(text) {
     case "/review":
     case "/compact":
     case "/new":
-    case "/resume":
       await sendSlashToScreenCli(text);
+      return;
+    case "/resume":
+      await sendResumeToScreenCli(text);
       return;
     default:
       await sendSlashToScreenCli(text);
@@ -816,6 +872,11 @@ async function sendSlashToScreenCli(text) {
   await submitScreenCliInput(text, `Sent to screen Codex CLI: ${text}`);
 }
 
+async function sendResumeToScreenCli(text) {
+  const sent = await submitScreenCliInput(text, `Sent to screen Codex CLI: ${text}`);
+  if (sent) await sendResumePickerToTelegram();
+}
+
 async function sendTextToScreenCli(text) {
   await submitScreenCliInput(text, `Sent to screen Codex CLI: ${text}`);
 }
@@ -823,10 +884,54 @@ async function sendTextToScreenCli(text) {
 async function submitScreenCliInput(text, successMessage) {
   try {
     await sendPtyControl({ action: "submit", text });
-    await sendTelegramText(successMessage);
+    if (successMessage) await sendTelegramText(successMessage);
+    return true;
   } catch (error) {
     await sendTelegramText(`Failed to send input to screen Codex CLI: ${error.message}`);
+    return false;
   }
+}
+
+async function sendResumePickerToTelegram() {
+  const upstream = getActiveUpstream();
+  if (!upstream) {
+    await sendTelegramText("Cannot mirror resume picker: Codex upstream is not connected.");
+    return;
+  }
+
+  const response = await sendBridgeRequest(upstream, "thread/list", {
+    limit: 20,
+    sortKey: "updated_at",
+    sortDirection: "desc",
+    archived: false,
+  });
+  if (response.error) {
+    await sendTelegramText(`Cannot mirror resume picker: ${response.error.message || JSON.stringify(response.error)}`);
+    return;
+  }
+
+  const threads = response.result?.data || [];
+  if (!threads.length) {
+    await sendTelegramText("No Codex sessions found for /resume.");
+    return;
+  }
+
+  const buttons = threads.map((thread, index) => {
+    const token = shortApprovalToken(`${thread.id}:${index}:${Date.now()}:${Math.random()}`).slice(0, 16);
+    resumePickerSelections.set(token, { index, thread, createdAt: Date.now() });
+    return [{ text: formatThreadButton(thread), callback_data: `rp:${token}` }];
+  });
+  buttons.push([{ text: "Cancel", callback_data: "rp_cancel" }]);
+
+  await sendTelegramMessage({
+    chat_id: TELEGRAM_CHAT_ID,
+    text: [
+      "Resume a previous session",
+      "",
+      "Tap a session to select it in the screen Codex CLI picker.",
+    ].join("\n"),
+    reply_markup: { inline_keyboard: buttons },
+  });
 }
 
 function sendPtyControl(payload, timeoutMs = 3000) {
