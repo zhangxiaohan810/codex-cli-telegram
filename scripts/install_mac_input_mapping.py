@@ -23,37 +23,8 @@ import signal
 import sys
 from pathlib import Path
 
-from AppKit import NSEvent
 from Cocoa import NSRunLoop
-from Quartz import (
-    CFMachPortCreateRunLoopSource,
-    CFRunLoopAddSource,
-    CFRunLoopGetCurrent,
-    CGEventCreateKeyboardEvent,
-    CGEventGetFlags,
-    CGEventGetIntegerValueField,
-    CGEventKeyboardSetUnicodeString,
-    CGEventMaskBit,
-    CGEventPost,
-    CGEventSetFlags,
-    CGEventSetIntegerValueField,
-    CGEventTapCreate,
-    CGEventTapEnable,
-    CGEventTapOptionDefault,
-    CGEventTapPlacementHeadInsertEventTap,
-    kCFRunLoopCommonModes,
-    kCGEventFlagMaskCommand,
-    kCGEventFlagMaskControl,
-    kCGEventKeyDown,
-    kCGEventKeyUp,
-    kCGEventScrollWheel,
-    kCGHIDEventTap,
-    kCGKeyboardEventKeycode,
-    kCGScrollWheelEventDeltaAxis1,
-    kCGScrollWheelEventFixedPtDeltaAxis1,
-    kCGScrollWheelEventIsContinuous,
-    kCGSessionEventTap,
-)
+import Quartz
 
 
 KEYCODES = {
@@ -96,31 +67,45 @@ def should_flip_scroll(event) -> bool:
         return False
     if not CFG["discrete_only"]:
         return True
-    return not bool(CGEventGetIntegerValueField(event, kCGScrollWheelEventIsContinuous))
+    return not bool(
+        Quartz.CGEventGetIntegerValueField(
+            event, Quartz.kCGScrollWheelEventIsContinuous
+        )
+    )
 
 
 def emit_command_key(keycode: int, is_down: bool) -> None:
-    event = CGEventCreateKeyboardEvent(None, keycode, is_down)
-    CGEventSetFlags(event, kCGEventFlagMaskCommand)
-    CGEventPost(kCGHIDEventTap, event)
+    event = Quartz.CGEventCreateKeyboardEvent(None, keycode, is_down)
+    Quartz.CGEventSetFlags(event, Quartz.kCGEventFlagMaskCommand)
+    Quartz.CGEventPost(Quartz.kCGHIDEventTap, event)
 
 
 def callback(_proxy, event_type, event, _refcon):
     if not STATE["enabled"]:
         return event
 
-    if event_type in (kCGEventKeyDown, kCGEventKeyUp):
-        flags = CGEventGetFlags(event)
-        keycode = CGEventGetIntegerValueField(event, kCGKeyboardEventKeycode)
-        if flags & kCGEventFlagMaskControl and keycode in CFG["keys"]:
-            emit_command_key(keycode, event_type == kCGEventKeyDown)
+    if event_type in (Quartz.kCGEventKeyDown, Quartz.kCGEventKeyUp):
+        flags = Quartz.CGEventGetFlags(event)
+        keycode = Quartz.CGEventGetIntegerValueField(
+            event, Quartz.kCGKeyboardEventKeycode
+        )
+        if flags & Quartz.kCGEventFlagMaskControl and keycode in CFG["keys"]:
+            emit_command_key(keycode, event_type == Quartz.kCGEventKeyDown)
             return None
 
-    if event_type == kCGEventScrollWheel and should_flip_scroll(event):
-        axis1 = CGEventGetIntegerValueField(event, kCGScrollWheelEventDeltaAxis1)
-        CGEventSetIntegerValueField(event, kCGScrollWheelEventDeltaAxis1, -axis1)
-        fixed_axis1 = CGEventGetIntegerValueField(event, kCGScrollWheelEventFixedPtDeltaAxis1)
-        CGEventSetIntegerValueField(event, kCGScrollWheelEventFixedPtDeltaAxis1, -fixed_axis1)
+    if event_type == Quartz.kCGEventScrollWheel and should_flip_scroll(event):
+        axis1 = Quartz.CGEventGetIntegerValueField(
+            event, Quartz.kCGScrollWheelEventDeltaAxis1
+        )
+        Quartz.CGEventSetIntegerValueField(
+            event, Quartz.kCGScrollWheelEventDeltaAxis1, -axis1
+        )
+        fixed_axis1 = Quartz.CGEventGetIntegerValueField(
+            event, Quartz.kCGScrollWheelEventFixedPtDeltaAxis1
+        )
+        Quartz.CGEventSetIntegerValueField(
+            event, Quartz.kCGScrollWheelEventFixedPtDeltaAxis1, -fixed_axis1
+        )
         return event
 
     return event
@@ -135,14 +120,14 @@ def main() -> int:
     signal.signal(signal.SIGTERM, handle_stop)
 
     mask = (
-        CGEventMaskBit(kCGEventKeyDown)
-        | CGEventMaskBit(kCGEventKeyUp)
-        | CGEventMaskBit(kCGEventScrollWheel)
+        Quartz.CGEventMaskBit(Quartz.kCGEventKeyDown)
+        | Quartz.CGEventMaskBit(Quartz.kCGEventKeyUp)
+        | Quartz.CGEventMaskBit(Quartz.kCGEventScrollWheel)
     )
-    tap = CGEventTapCreate(
-        kCGSessionEventTap,
-        CGEventTapPlacementHeadInsertEventTap,
-        CGEventTapOptionDefault,
+    tap = Quartz.CGEventTapCreate(
+        Quartz.kCGSessionEventTap,
+        Quartz.kCGHeadInsertEventTap,
+        Quartz.kCGEventTapOptionDefault,
         mask,
         callback,
         None,
@@ -150,9 +135,11 @@ def main() -> int:
     if tap is None:
         print("Failed to create event tap. Enable Input Monitoring and Accessibility for the terminal or Python process.", file=sys.stderr)
         return 1
-    source = CFMachPortCreateRunLoopSource(None, tap, 0)
-    CFRunLoopAddSource(CFRunLoopGetCurrent(), source, kCFRunLoopCommonModes)
-    CGEventTapEnable(tap, True)
+    source = Quartz.CFMachPortCreateRunLoopSource(None, tap, 0)
+    Quartz.CFRunLoopAddSource(
+        Quartz.CFRunLoopGetCurrent(), source, Quartz.kCFRunLoopCommonModes
+    )
+    Quartz.CGEventTapEnable(tap, True)
     NSRunLoop.currentRunLoop().run()
     return 0
 
@@ -176,7 +163,7 @@ if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
   exit 0
 fi
 
-if ! "$PY" -c 'from AppKit import NSEvent; from Cocoa import NSRunLoop; from Quartz import CGEventTapCreate, CGEventTapEnable, kCGEventKeyDown, kCGEventScrollWheel' >/dev/null 2>&1; then
+if ! "$PY" -c 'from Cocoa import NSRunLoop; import Quartz; print(Quartz.CGEventTapCreate)' >/dev/null 2>&1; then
   echo "Missing pyobjc in $PY" >&2
   echo "Install it with:" >&2
   echo "  $PY -m pip install pyobjc" >&2
@@ -185,9 +172,15 @@ fi
 
 nohup "$PY" "$SERVICE" >"$LOG" 2>&1 &
 echo $! > "$PIDFILE"
-sleep 0.5
+sleep 1
 
 if ! kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
+  cat "$LOG" >&2
+  rm -f "$PIDFILE"
+  exit 1
+fi
+
+if ps -o stat= -p "$(cat "$PIDFILE")" 2>/dev/null | grep -q '^Z'; then
   cat "$LOG" >&2
   rm -f "$PIDFILE"
   exit 1
