@@ -74,6 +74,12 @@ def should_flip_scroll(event) -> bool:
     )
 
 
+def invert_scroll_field(event, field) -> None:
+    value = Quartz.CGEventGetIntegerValueField(event, field)
+    if value:
+        Quartz.CGEventSetIntegerValueField(event, field, -value)
+
+
 def emit_command_key(keycode: int, is_down: bool) -> None:
     event = Quartz.CGEventCreateKeyboardEvent(None, keycode, is_down)
     Quartz.CGEventSetFlags(event, Quartz.kCGEventFlagMaskCommand)
@@ -94,18 +100,10 @@ def callback(_proxy, event_type, event, _refcon):
             return None
 
     if event_type == Quartz.kCGEventScrollWheel and should_flip_scroll(event):
-        axis1 = Quartz.CGEventGetIntegerValueField(
-            event, Quartz.kCGScrollWheelEventDeltaAxis1
-        )
-        Quartz.CGEventSetIntegerValueField(
-            event, Quartz.kCGScrollWheelEventDeltaAxis1, -axis1
-        )
-        fixed_axis1 = Quartz.CGEventGetIntegerValueField(
-            event, Quartz.kCGScrollWheelEventFixedPtDeltaAxis1
-        )
-        Quartz.CGEventSetIntegerValueField(
-            event, Quartz.kCGScrollWheelEventFixedPtDeltaAxis1, -fixed_axis1
-        )
+        invert_scroll_field(event, Quartz.kCGScrollWheelEventDeltaAxis1)
+        invert_scroll_field(event, Quartz.kCGScrollWheelEventFixedPtDeltaAxis1)
+        if hasattr(Quartz, "kCGScrollWheelEventPointDeltaAxis1"):
+            invert_scroll_field(event, Quartz.kCGScrollWheelEventPointDeltaAxis1)
         return event
 
     return event
