@@ -166,7 +166,7 @@ Telegram 发来的普通文字和 Codex slash 命令都会写入屏幕里的 Cod
 ```text
 /model
 /reasoning
-/approvals
+/permissions
 /status
 /diff
 /review

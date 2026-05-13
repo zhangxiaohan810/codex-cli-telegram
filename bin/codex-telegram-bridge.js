@@ -39,6 +39,7 @@ const agentBuffers = new Map();
 const streamedItems = new Set();
 const fileChangePatches = new Map();
 const resumePickerSelections = new Map();
+const modelPickerSelections = new Map();
 let activeClient = null;
 let activeThreadId = null;
 let activeTurnId = null;
@@ -353,12 +354,12 @@ async function handleTelegramCallback(query) {
   }
 
   if (data.startsWith("e:")) {
-    await handleScreenOnlyCallback(query, "/reasoning");
+    await handleScreenOnlyCallback(query, "/model");
     return;
   }
 
   if (data.startsWith("ap:")) {
-    await handleScreenOnlyCallback(query, "/approvals");
+    await handleScreenOnlyCallback(query, "/permissions");
     return;
   }
 
@@ -369,6 +370,16 @@ async function handleTelegramCallback(query) {
 
   if (data === "rp_cancel") {
     await handleResumePickerCancel(query);
+    return;
+  }
+
+  if (data.startsWith("mp:")) {
+    await handleModelPickerCallback(query, data);
+    return;
+  }
+
+  if (data === "mp_cancel") {
+    await handleModelPickerCancel(query);
     return;
   }
 
@@ -441,6 +452,44 @@ async function handleResumePickerCancel(query) {
     chat_id: query.message.chat?.id || TELEGRAM_CHAT_ID,
     message_id: query.message.message_id,
     text: "Cancelled resume picker.",
+    reply_markup: { inline_keyboard: [] },
+  });
+}
+
+async function handleModelPickerCallback(query, data) {
+  const token = data.slice(3);
+  const selection = modelPickerSelections.get(token);
+  if (!selection) {
+    await editTelegramApproval(query.message, "Model selection expired.");
+    return;
+  }
+
+  try {
+    await sendPtyControl({ action: "submit", text: selection.model.model });
+    modelPickerSelections.delete(token);
+    await telegram("editMessageText", {
+      chat_id: query.message.chat?.id || TELEGRAM_CHAT_ID,
+      message_id: query.message.message_id,
+      text: [
+        "Selected model on screen Codex CLI.",
+        "",
+        formatModelButton(selection.model),
+      ].join("\n"),
+      reply_markup: { inline_keyboard: [] },
+    });
+  } catch (error) {
+    await editTelegramApproval(query.message, `Failed to select model: ${error.message}`);
+  }
+}
+
+async function handleModelPickerCancel(query) {
+  try {
+    await sendPtyControl({ action: "write", text: "\x1b" });
+  } catch {}
+  await telegram("editMessageText", {
+    chat_id: query.message.chat?.id || TELEGRAM_CHAT_ID,
+    message_id: query.message.message_id,
+    text: "Cancelled model picker.",
     reply_markup: { inline_keyboard: [] },
   });
 }
@@ -690,8 +739,8 @@ async function setupTelegramCommands() {
       { command: "bridge_status", description: "Show bridge connection status" },
       { command: "help", description: "Type /help into screen Codex CLI" },
       { command: "model", description: "Type /model into screen Codex CLI" },
-      { command: "reasoning", description: "Type /reasoning into screen Codex CLI" },
-      { command: "approvals", description: "Type /approvals into screen Codex CLI" },
+      { command: "reasoning", description: "Open /model in screen Codex CLI" },
+      { command: "permissions", description: "Type /permissions into screen Codex CLI" },
       { command: "status", description: "Type /status into screen Codex CLI" },
       { command: "diff", description: "Type /diff into screen Codex CLI" },
       { command: "review", description: "Type /review into screen Codex CLI" },
@@ -760,15 +809,22 @@ async function handleSlashCommand(text) {
       await stopActiveTurn();
       return;
     case "/help":
-    case "/model":
-    case "/reasoning":
-    case "/approvals":
+    case "/permissions":
     case "/status":
     case "/diff":
     case "/review":
     case "/compact":
     case "/new":
       await sendSlashToScreenCli(text);
+      return;
+    case "/model":
+      await sendModelToScreenCli(text);
+      return;
+    case "/reasoning":
+      await sendModelToScreenCli("/model");
+      return;
+    case "/approvals":
+      await sendSlashToScreenCli("/permissions");
       return;
     case "/resume":
       await sendResumeToScreenCli(text);
@@ -872,6 +928,11 @@ async function sendSlashToScreenCli(text) {
   await submitScreenCliInput(text, `Sent to screen Codex CLI: ${text}`);
 }
 
+async function sendModelToScreenCli(text) {
+  const sent = await submitScreenCliInput(text, `Sent to screen Codex CLI: ${text}`);
+  if (sent) await sendModelPickerToTelegram();
+}
+
 async function sendResumeToScreenCli(text) {
   const sent = await submitScreenCliInput(text, `Sent to screen Codex CLI: ${text}`);
   if (sent) await sendResumePickerToTelegram();
@@ -890,6 +951,46 @@ async function submitScreenCliInput(text, successMessage) {
     await sendTelegramText(`Failed to send input to screen Codex CLI: ${error.message}`);
     return false;
   }
+}
+
+async function sendModelPickerToTelegram() {
+  const upstream = getActiveUpstream();
+  if (!upstream) {
+    await sendTelegramText("Cannot mirror model picker: Codex upstream is not connected.");
+    return;
+  }
+
+  const response = await sendBridgeRequest(upstream, "model/list", {
+    includeHidden: false,
+    limit: 30,
+  });
+  if (response.error) {
+    await sendTelegramText(`Cannot mirror model picker: ${response.error.message || JSON.stringify(response.error)}`);
+    return;
+  }
+
+  const models = response.result?.data || [];
+  if (!models.length) {
+    await sendTelegramText("No Codex models returned by app-server.");
+    return;
+  }
+
+  const buttons = models.slice(0, 20).map((model) => {
+    const token = shortApprovalToken(`${model.model}:${Date.now()}:${Math.random()}`).slice(0, 16);
+    modelPickerSelections.set(token, { model, createdAt: Date.now() });
+    return [{ text: formatModelButton(model), callback_data: `mp:${token}` }];
+  });
+  buttons.push([{ text: "Cancel", callback_data: "mp_cancel" }]);
+
+  await sendTelegramMessage({
+    chat_id: TELEGRAM_CHAT_ID,
+    text: [
+      "Choose a Codex model",
+      "",
+      "Tap a model to search and select it in the screen Codex CLI picker.",
+    ].join("\n"),
+    reply_markup: { inline_keyboard: buttons },
+  });
 }
 
 async function sendResumePickerToTelegram() {
@@ -1013,14 +1114,6 @@ async function sendCurrentDiff() {
   await sendTelegramBlock(`git diff${sha ? ` ${sha}` : ""}`, diff);
 }
 
-async function handleReasoningCommand(argument) {
-  await sendScreenOnlyCommandNotice("/reasoning", argument);
-}
-
-async function handleApprovalPolicyCommand(argument) {
-  await sendScreenOnlyCommandNotice("/approvals", argument);
-}
-
 async function startReview(argument) {
   const upstream = getActiveUpstream();
   if (!upstream) {
@@ -1129,6 +1222,12 @@ function formatThreadButton(thread) {
   const title = thread.name || thread.preview || thread.id;
   const date = thread.updatedAt ? new Date(thread.updatedAt * 1000).toISOString().slice(0, 10) : "";
   return truncateSingleLine(`${date} ${title}`, 58);
+}
+
+function formatModelButton(model) {
+  const label = model.displayName || model.model;
+  const suffix = model.isDefault ? " (default)" : "";
+  return truncateSingleLine(`${label}${suffix}`, 58);
 }
 
 function formatThreadStatus(status) {

@@ -198,7 +198,7 @@ Codex slash commands are typed into the screen CLI:
 ```text
 /model
 /reasoning
-/approvals
+/permissions
 /status
 /diff
 /review
