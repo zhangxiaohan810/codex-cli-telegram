@@ -438,6 +438,10 @@ async function handleResumeCallback(query, data) {
     await editTelegramApproval(query.message, "Codex upstream is not connected.");
     return;
   }
+  if (activeTurnId) {
+    await editTelegramApproval(query.message, "A Codex turn is running. Use /stop or wait for it to finish before /resume.");
+    return;
+  }
 
   const response = await sendBridgeRequest(upstream, "thread/resume", withThreadOverrides({
     threadId: thread.id,
@@ -450,6 +454,7 @@ async function handleResumeCallback(query, data) {
   }
 
   updateRuntimeFromThreadResponse(response.result || {});
+  syncThreadToScreen(response.result || {});
   activeThreadId = activeThreadId || thread.id;
   activeCwd = activeCwd || thread.cwd;
   resumeSelections.delete(token);
@@ -464,7 +469,7 @@ async function handleResumeCallback(query, data) {
       `cwd: ${activeCwd || "(unknown)"}`,
       `model: ${currentModel || "(server default)"}`,
       "",
-      "Telegram messages will continue this thread. The screen CLI may keep its own current view until it receives new server events.",
+      "Telegram and the screen CLI were asked to use this thread.",
     ].join("\n"),
     reply_markup: { inline_keyboard: [] },
   });
@@ -965,6 +970,10 @@ async function startNewThread(argument) {
     await sendTelegramText("Codex upstream is not connected. Start Codex with codex-telegram first.");
     return;
   }
+  if (activeTurnId) {
+    await sendTelegramText("A Codex turn is running. Use /stop or wait for it to finish before /new.");
+    return;
+  }
 
   const params = withThreadOverrides({
     ...(activeCwd ? { cwd: activeCwd } : {}),
@@ -978,13 +987,14 @@ async function startNewThread(argument) {
   }
 
   updateRuntimeFromThreadResponse(response.result || {});
+  syncThreadToScreen(response.result || {});
   await sendTelegramText([
-    "Started a new Codex thread for Telegram.",
+    "Started a new Codex thread.",
     "",
     `thread: ${activeThreadId || "(unknown)"}`,
     `cwd: ${activeCwd || "(unknown)"}`,
     `model: ${currentModel || "(server default)"}`,
-    argument ? "" : "Send normal Telegram text to start work in this thread.",
+    argument ? "" : "Telegram and the screen CLI were asked to use this thread.",
   ].filter(Boolean).join("\n"));
 
   if (argument) await injectTelegramText(argument);
@@ -1215,6 +1225,26 @@ function updateRuntimeFromThreadResponse(result) {
   currentModel = result.model || currentModel;
   currentEffort = result.reasoningEffort || currentEffort;
   currentApprovalPolicy = result.approvalPolicy || currentApprovalPolicy;
+}
+
+function syncThreadToScreen(result) {
+  if (!activeClient?.open || !result?.thread?.id) return;
+
+  const started = {
+    method: "thread/started",
+    params: { thread: result.thread },
+  };
+  const status = {
+    method: "thread/status/changed",
+    params: {
+      threadId: result.thread.id,
+      status: result.thread.status || { type: "idle" },
+    },
+  };
+
+  activeClient.sendText(JSON.stringify(started));
+  activeClient.sendText(JSON.stringify(status));
+  console.log(`[bridge] synced screen client to thread=${result.thread.id}`);
 }
 
 function withThreadOverrides(params) {

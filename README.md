@@ -202,6 +202,7 @@ Supported Codex commands:
 ```
 
 Unsupported slash commands are rejected by the bridge instead of being sent as normal prompts.
+`/new` and `/resume` create or restore an app-server thread, then send thread switch notifications to the connected screen CLI so Telegram and the terminal stay on the same thread. If a turn is running, wait for it to finish or use `/stop` first.
 
 For debugging command routing, set `BRIDGE_DEBUG_RPC=1` in `.env` and restart `codex-telegram-bridge`.
 
