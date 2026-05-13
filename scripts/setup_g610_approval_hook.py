@@ -48,6 +48,22 @@ def ask_text(prompt: str, default: str | None = None) -> str:
     return answer or (default or "")
 
 
+def load_env(path: Path) -> dict[str, str]:
+    values = {}
+    if not path.exists():
+        return values
+    for line in path.read_text().splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+        key, value = stripped.split("=", 1)
+        value = value.strip()
+        if (value.startswith('"') and value.endswith('"')) or (value.startswith("'") and value.endswith("'")):
+            value = value[1:-1]
+        values[key.strip()] = value
+    return values
+
+
 def ask_yes_no(prompt: str, default: bool = True) -> bool:
     suffix = "Y/n" if default else "y/N"
     while True:
@@ -273,9 +289,9 @@ def main() -> int:
     parser.add_argument("--mode", choices=["local", "ssh"], help="Where the bridge runs relative to the keyboard computer")
     parser.add_argument("--local-os", choices=["mac", "win"], help="OS of the computer that has the G610 plugged in")
     parser.add_argument("--mac-host", help="Mac IP, hostname, or Tailscale/MagicDNS name for ssh mode")
-    parser.add_argument("--mac-user", default="Tiezhu", help="Mac SSH user")
+    parser.add_argument("--mac-user", default=None, help="Mac SSH user")
     parser.add_argument("--mac-python", default=None, help="Python with hidapi on the Mac")
-    parser.add_argument("--mac-dir", default="/Users/Tiezhu/Downloads/codex-g610", help="Install directory on the Mac")
+    parser.add_argument("--mac-dir", default=None, help="Install directory on the Mac")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT, help="Local controller TCP port")
     parser.add_argument("--env-file", default=str(ROOT / ".env"), help="Bridge .env path")
     parser.add_argument("--test", action="store_true", help="Run a 5-second blink test after setup")
@@ -283,9 +299,11 @@ def main() -> int:
     parser.add_argument("--input-mapping", choices=["ask", "yes", "no"], default="ask", help="Install macOS keyboard/mouse mapping templates")
     args = parser.parse_args()
 
-    mode = args.mode or ask_choice("Use the G610 on this machine or over SSH?", ["local", "ssh"], "ssh")
-    local_os = args.local_os or ask_choice("Which OS has the G610 plugged in?", ["mac", "win"], "mac")
     env_file = Path(args.env_file)
+    existing = load_env(env_file)
+
+    mode = args.mode or existing.get("G610_USAGE_MODE") or ask_choice("Use the G610 on this machine or over SSH?", ["local", "ssh"], "ssh")
+    local_os = args.local_os or existing.get("G610_LOCAL_OS") or ask_choice("Which OS has the G610 plugged in?", ["mac", "win"], "mac")
 
     if local_os == "win":
         return fail_windows()
@@ -301,8 +319,8 @@ def main() -> int:
             run_blink_test(start_cmd, stop_cmd)
         return 0
 
-    mac_host = args.mac_host or ask_text("Mac host/IP")
-    mac_user = args.mac_user or ask_text("Mac SSH user", os.environ.get("USER", "Tiezhu"))
+    mac_host = args.mac_host or existing.get("MAC_HOST") or ask_text("Mac host/IP")
+    mac_user = args.mac_user or existing.get("MAC_SSH_USER") or ask_text("Mac SSH user", os.environ.get("USER", "Tiezhu"))
     mac_dir = args.mac_dir or ask_text("Install directory on Mac", "/Users/Tiezhu/Downloads/codex-g610")
     start_cmd, stop_cmd = install_ssh_macos(env_file, mac_host, mac_user, mac_python, mac_dir, args.port)
     if args.input_mapping == "yes" or (args.input_mapping == "ask" and ask_yes_no("Install optional Mac keyboard/mouse mapping templates on the Mac?", False)):
