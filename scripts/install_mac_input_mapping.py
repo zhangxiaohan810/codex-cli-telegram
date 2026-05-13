@@ -45,6 +45,7 @@ KEYCODES = {
 
 CONFIG = Path.home() / ".codex-g610" / "mapping.json"
 STATE = {"enabled": True}
+SYNTHETIC_SCROLL_TAG = 0x434F444558474631
 
 
 def load_config() -> dict:
@@ -74,10 +75,75 @@ def should_flip_scroll(event) -> bool:
     )
 
 
-def invert_scroll_field(event, field) -> None:
-    value = Quartz.CGEventGetIntegerValueField(event, field)
-    if value:
-        Quartz.CGEventSetIntegerValueField(event, field, -value)
+def get_scroll_value(event, field) -> int:
+    if not hasattr(Quartz, field):
+        return 0
+    return int(Quartz.CGEventGetIntegerValueField(event, getattr(Quartz, field)))
+
+
+def is_synthetic_scroll_event(event) -> bool:
+    if not hasattr(Quartz, "kCGEventSourceUserData"):
+        return False
+    return (
+        Quartz.CGEventGetIntegerValueField(event, Quartz.kCGEventSourceUserData)
+        == SYNTHETIC_SCROLL_TAG
+    )
+
+
+def build_reversed_scroll_event(event):
+    line_v = -get_scroll_value(event, "kCGScrollWheelEventDeltaAxis1")
+    line_h = -get_scroll_value(event, "kCGScrollWheelEventDeltaAxis2")
+    fixed_v = -get_scroll_value(event, "kCGScrollWheelEventFixedPtDeltaAxis1")
+    fixed_h = -get_scroll_value(event, "kCGScrollWheelEventFixedPtDeltaAxis2")
+    point_v = -get_scroll_value(event, "kCGScrollWheelEventPointDeltaAxis1")
+    point_h = -get_scroll_value(event, "kCGScrollWheelEventPointDeltaAxis2")
+    is_continuous = bool(
+        get_scroll_value(event, "kCGScrollWheelEventIsContinuous")
+    )
+
+    units = (
+        Quartz.kCGScrollEventUnitPixel
+        if is_continuous
+        else Quartz.kCGScrollEventUnitLine
+    )
+    primary = point_v if is_continuous and point_v else line_v
+    secondary = point_h if is_continuous and point_h else line_h
+    wheel_count = 2 if secondary else 1
+
+    new_event = Quartz.CGEventCreateScrollWheelEvent(
+        None, units, wheel_count, primary, secondary
+    )
+    if new_event is None:
+        return None
+
+    Quartz.CGEventSetFlags(new_event, Quartz.CGEventGetFlags(event))
+
+    if hasattr(Quartz, "kCGEventSourceUserData"):
+        Quartz.CGEventSetIntegerValueField(
+            new_event, Quartz.kCGEventSourceUserData, SYNTHETIC_SCROLL_TAG
+        )
+
+    if hasattr(Quartz, "kCGScrollWheelEventIsContinuous"):
+        Quartz.CGEventSetIntegerValueField(
+            new_event,
+            Quartz.kCGScrollWheelEventIsContinuous,
+            1 if is_continuous else 0,
+        )
+
+    for field, value in (
+        ("kCGScrollWheelEventDeltaAxis1", line_v),
+        ("kCGScrollWheelEventDeltaAxis2", line_h),
+        ("kCGScrollWheelEventFixedPtDeltaAxis1", fixed_v),
+        ("kCGScrollWheelEventFixedPtDeltaAxis2", fixed_h),
+        ("kCGScrollWheelEventPointDeltaAxis1", point_v),
+        ("kCGScrollWheelEventPointDeltaAxis2", point_h),
+    ):
+        if value and hasattr(Quartz, field):
+            Quartz.CGEventSetIntegerValueField(
+                new_event, getattr(Quartz, field), value
+            )
+
+    return new_event
 
 
 def emit_command_key(keycode: int, is_down: bool) -> None:
@@ -90,6 +156,9 @@ def callback(_proxy, event_type, event, _refcon):
     if not STATE["enabled"]:
         return event
 
+    if event_type == Quartz.kCGEventScrollWheel and is_synthetic_scroll_event(event):
+        return event
+
     if event_type in (Quartz.kCGEventKeyDown, Quartz.kCGEventKeyUp):
         flags = Quartz.CGEventGetFlags(event)
         keycode = Quartz.CGEventGetIntegerValueField(
@@ -100,11 +169,11 @@ def callback(_proxy, event_type, event, _refcon):
             return None
 
     if event_type == Quartz.kCGEventScrollWheel and should_flip_scroll(event):
-        invert_scroll_field(event, Quartz.kCGScrollWheelEventDeltaAxis1)
-        invert_scroll_field(event, Quartz.kCGScrollWheelEventFixedPtDeltaAxis1)
-        if hasattr(Quartz, "kCGScrollWheelEventPointDeltaAxis1"):
-            invert_scroll_field(event, Quartz.kCGScrollWheelEventPointDeltaAxis1)
-        return event
+        new_event = build_reversed_scroll_event(event)
+        if new_event is None:
+            return event
+        Quartz.CGEventPost(Quartz.kCGHIDEventTap, new_event)
+        return None
 
     return event
 
