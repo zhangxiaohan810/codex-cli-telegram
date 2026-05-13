@@ -39,10 +39,8 @@ from Quartz import (
     CGEventSetIntegerValueField,
     CGEventTapCreate,
     CGEventTapEnable,
-    CGEventTapLocation,
     CGEventTapOptionDefault,
     CGEventTapPlacementHeadInsertEventTap,
-    CGEventType,
     kCFRunLoopCommonModes,
     kCGEventFlagMaskCommand,
     kCGEventFlagMaskControl,
@@ -178,7 +176,7 @@ if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
   exit 0
 fi
 
-if ! "$PY" -c 'from AppKit import NSEvent; from Cocoa import NSRunLoop; from Quartz import CGEventTapCreate' >/dev/null 2>&1; then
+if ! "$PY" -c 'from AppKit import NSEvent; from Cocoa import NSRunLoop; from Quartz import CGEventTapCreate, CGEventTapEnable, kCGEventKeyDown, kCGEventScrollWheel' >/dev/null 2>&1; then
   echo "Missing pyobjc in $PY" >&2
   echo "Install it with:" >&2
   echo "  $PY -m pip install pyobjc" >&2
