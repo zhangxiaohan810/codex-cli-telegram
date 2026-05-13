@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Blink a Logitech G610 keyboard backlight at 10 Hz.
+"""Blink a Logitech G610 keyboard backlight at 3 Hz.
 
 Requires the Python `hidapi` package (`python -m pip install hidapi`).
 On macOS this usually needs sudo because the keyboard HID interface is
@@ -19,7 +19,7 @@ VID = 0x046D
 PID = 0xC338
 USAGE_PAGE = 0xFF43
 USAGE = 0x0604
-HALF_PERIOD_SECONDS = 0.05
+HALF_PERIOD_SECONDS = 1.0 / 6.0
 
 ON = [
     0x11,
