@@ -29,6 +29,8 @@ USAGE = 0x0604
 HOST = "127.0.0.1"
 PORT = 19610
 HALF_PERIOD_SECONDS = 1.0 / 6.0
+DEFAULT_IDLE_BRIGHTNESS = 0
+DEFAULT_BLINK_BRIGHTNESS = 100
 
 ON = [
     0x11,
@@ -71,6 +73,19 @@ def pad(packet: list[int]) -> bytes:
     return bytes(packet + [0x00] * (20 - len(packet)))
 
 
+def clamp_brightness(value: int) -> int:
+    return max(0, min(100, value))
+
+
+def packet_for_brightness(brightness: int) -> list[int]:
+    brightness = clamp_brightness(brightness)
+    if brightness <= 0:
+        return OFF.copy()
+    packet = ON.copy()
+    packet[6] = round(0xFF * brightness / 100)
+    return packet
+
+
 class G610Controller:
     def __init__(self) -> None:
         self.device = hid.device()
@@ -78,6 +93,8 @@ class G610Controller:
         self.lock = threading.Lock()
         self.blinking = threading.Event()
         self.stopped = threading.Event()
+        self.default_brightness = DEFAULT_IDLE_BRIGHTNESS
+        self.blink_brightness = DEFAULT_BLINK_BRIGHTNESS
         self.thread = threading.Thread(target=self.blink_loop, daemon=True)
         self.thread.start()
 
@@ -101,7 +118,8 @@ class G610Controller:
                 next_tick = time.monotonic()
                 time.sleep(0.01)
                 continue
-            self.write_state(ON if on else OFF)
+            brightness = self.blink_brightness if on else self.default_brightness
+            self.write_state(packet_for_brightness(brightness))
             on = not on
             next_tick += HALF_PERIOD_SECONDS
             delay = next_tick - time.monotonic()
@@ -115,7 +133,19 @@ class G610Controller:
 
     def stop(self) -> None:
         self.blinking.clear()
-        self.write_state(OFF)
+        self.write_state(packet_for_brightness(self.default_brightness))
+
+    def set_default_brightness(self, brightness: int) -> None:
+        self.default_brightness = clamp_brightness(brightness)
+        if not self.blinking.is_set():
+            self.write_state(packet_for_brightness(self.default_brightness))
+
+    def set_blink_brightness(self, brightness: int) -> None:
+        self.blink_brightness = clamp_brightness(brightness)
+
+    def status(self) -> str:
+        state = "blinking" if self.blinking.is_set() else "idle"
+        return f"ok {state} default={self.default_brightness} blink={self.blink_brightness}\n"
 
     def close(self) -> None:
         self.stopped.set()
@@ -139,6 +169,7 @@ def serve(controller: G610Controller) -> None:
                 continue
             with connection:
                 command = connection.recv(64).decode("utf-8", "replace").strip().lower()
+                parts = command.split()
                 if command == "start":
                     controller.start()
                     connection.sendall(b"ok start\n")
@@ -146,8 +177,19 @@ def serve(controller: G610Controller) -> None:
                     controller.stop()
                     connection.sendall(b"ok stop\n")
                 elif command == "status":
-                    state = b"blinking" if controller.blinking.is_set() else b"idle"
-                    connection.sendall(b"ok " + state + b"\n")
+                    connection.sendall(controller.status().encode("utf-8"))
+                elif len(parts) == 3 and parts[0] == "set" and parts[1] == "default-brightness":
+                    try:
+                        controller.set_default_brightness(int(parts[2]))
+                        connection.sendall(controller.status().encode("utf-8"))
+                    except ValueError:
+                        connection.sendall(b"error invalid brightness\n")
+                elif len(parts) == 3 and parts[0] == "set" and parts[1] == "blink-brightness":
+                    try:
+                        controller.set_blink_brightness(int(parts[2]))
+                        connection.sendall(controller.status().encode("utf-8"))
+                    except ValueError:
+                        connection.sendall(b"error invalid brightness\n")
                 elif command == "quit":
                     connection.sendall(b"ok quit\n")
                     should_exit.set()
