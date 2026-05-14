@@ -10,6 +10,9 @@ from pathlib import Path
 KEYS = {
     "MAC_HOST",
     "MAC_SSH_USER",
+    "MAC_G610_SERVER_PORT",
+    "G610_USAGE_MODE",
+    "G610_LOCAL_OS",
     "APPROVAL_REQUEST_START_CMD",
     "APPROVAL_REQUEST_STOP_CMD",
 }
@@ -19,6 +22,7 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("mac_host", help="Mac IP, hostname, or Tailscale/MagicDNS name")
     parser.add_argument("--user", default="Tiezhu", help="Mac SSH user")
+    parser.add_argument("--port", type=int, default=19610, help="Mac-local G610 server port")
     parser.add_argument("--env-file", default=".env")
     args = parser.parse_args()
 
@@ -30,8 +34,11 @@ def main() -> int:
         [
             f"MAC_HOST={args.mac_host}",
             f"MAC_SSH_USER={args.user}",
-            "APPROVAL_REQUEST_START_CMD=ssh -o BatchMode=yes -o ConnectTimeout=5 $MAC_SSH_USER@$MAC_HOST '~/bin/g610-blink-start'",
-            "APPROVAL_REQUEST_STOP_CMD=ssh -o BatchMode=yes -o ConnectTimeout=5 $MAC_SSH_USER@$MAC_HOST '~/bin/g610-blink-stop'",
+            f"MAC_G610_SERVER_PORT={args.port}",
+            "G610_USAGE_MODE=ssh",
+            "G610_LOCAL_OS=mac",
+            f"APPROVAL_REQUEST_START_CMD=ssh -o BatchMode=yes -o ConnectTimeout=5 $MAC_SSH_USER@$MAC_HOST 'printf start | nc 127.0.0.1 {args.port}'",
+            f"APPROVAL_REQUEST_STOP_CMD=ssh -o BatchMode=yes -o ConnectTimeout=5 $MAC_SSH_USER@$MAC_HOST 'printf stop | nc 127.0.0.1 {args.port}'",
         ]
     )
 
