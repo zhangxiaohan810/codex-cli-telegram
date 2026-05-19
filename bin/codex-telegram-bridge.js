@@ -147,7 +147,7 @@ function handleUpstreamMessage(client, upstream, data, isActiveClient = true) {
 
   if (isActiveClient && handleBridgeResponse(msg)) return;
 
-  if (msg && isActiveClient) {
+  if (msg) {
     if (msg.id !== undefined && msg.method) {
       console.log(`[bridge] server request method=${msg.method} id=${msg.id}`);
     }
@@ -155,7 +155,7 @@ function handleUpstreamMessage(client, upstream, data, isActiveClient = true) {
       registerApproval(client, upstream, msg);
     } else if (msg.method === "serverRequest/resolved") {
       markResolved(client, msg.params?.requestId, "screen");
-    } else {
+    } else if (isActiveClient) {
       trackServerNotification(msg);
       mirrorNotification(msg);
     }

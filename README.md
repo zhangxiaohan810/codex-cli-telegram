@@ -93,6 +93,8 @@ This starts `codex app-server` and `codex-telegram-bridge` in the background if 
 codex --remote ws://127.0.0.1:8766
 ```
 
+`codex-telegram` only starts those listeners when `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` are configured.
+
 The visible Codex CLI is wrapped by a small Python PTY driver. Telegram input is typed into that same screen CLI through `127.0.0.1:8767`, so slash commands like `/model`, `/new`, and `/resume` run through Codex's native TUI command handling instead of changing bridge-only state.
 
 Logs are written under `.logs/`.
@@ -131,6 +133,21 @@ codex-notify-setup
 It asks whether the communication method is Telegram, keyboard light, or both. Telegram writes `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID`; keyboard light delegates to `codex-g610-setup`.
 
 Set `APPROVAL_REQUEST_START_CMD` to run a local command while any Codex approval request is pending. The bridge starts it when the first approval arrives and stops it when all pending approvals are resolved. `APPROVAL_REQUEST_STOP_CMD` is optional and runs after the start process is stopped.
+
+If you want keyboard approval notifications without Telegram, use the standalone Codex entrypoint. It starts a keyboard-only local bridge and ties the blink hook to the same approval request events that the Codex CLI receives:
+
+```bash
+codex-keyboard
+codex-keyboard status
+codex-keyboard test 5
+```
+
+For manual keyboard control:
+
+```bash
+codex-keyboard start
+codex-keyboard stop
+```
 
 For a Logitech G610, run the interactive installer:
 

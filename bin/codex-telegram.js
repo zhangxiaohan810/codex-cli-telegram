@@ -18,6 +18,12 @@ const ptyControlHost = env.PTY_CONTROL_HOST || "127.0.0.1";
 const ptyControlPort = Number(env.PTY_CONTROL_PORT || 8767);
 const pythonBin = env.PYTHON_BIN || "python3";
 
+if (!hasTelegramConfig(env)) {
+  console.error("[codex-telegram] Telegram is not configured; not starting listeners.");
+  console.error("[codex-telegram] Set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID, or use `codex-keyboard` for the no-listener Codex entrypoint.");
+  process.exit(2);
+}
+
 mkdirSync(logsDir, { recursive: true });
 
 await ensureListening({
@@ -114,6 +120,10 @@ function sleep(ms) {
 function defaultCodexBin() {
   const macAppBin = "/Applications/Codex.app/Contents/Resources/codex";
   return existsSync(macAppBin) ? macAppBin : "codex";
+}
+
+function hasTelegramConfig(env) {
+  return Boolean(env.TELEGRAM_BOT_TOKEN?.trim() && env.TELEGRAM_CHAT_ID?.trim());
 }
 
 function loadEnv(projectRoot) {
