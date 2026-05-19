@@ -1,0 +1,44 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Check JavaScript
+        run: npm run check
+
+      - name: Check Python scripts
+        run: |
+          python3 -m py_compile \
+            scripts/codex_keyboard.py \
+            scripts/setup_notifications.py \
+            scripts/setup_g610_approval_hook.py \
+            scripts/install_mac_input_mapping.py
+
+      - name: Build source archive
+        run: |
+          git archive --format=tar.gz --prefix=codex-cli-telegram-${GITHUB_REF_NAME}/ "$GITHUB_SHA" > codex-cli-telegram-${GITHUB_REF_NAME}.tar.gz
+
+      - name: Upload release
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: codex-cli-telegram-${{ github.ref_name }}.tar.gz
+          generate_release_notes: true
