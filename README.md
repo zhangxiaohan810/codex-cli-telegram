@@ -149,6 +149,12 @@ codex-keyboard start
 codex-keyboard stop
 ```
 
+If `codex-keyboard` cannot find Codex or finds a stale system path such as `/snap/bin/codex`, set the explicit CLI path in `.env`:
+
+```bash
+CODEX_BIN=/home/you/.nvm/versions/node/<version>/bin/codex
+```
+
 For a Logitech G610, run the interactive installer:
 
 ```bash

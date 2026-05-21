@@ -176,6 +176,12 @@ codex-keyboard start
 codex-keyboard stop
 ```
 
+如果 `codex-keyboard` 找不到 Codex，或者误用 `/snap/bin/codex` 这类旧路径，在 `.env` 里显式指定：
+
+```bash
+CODEX_BIN=/home/you/.nvm/versions/node/<version>/bin/codex
+```
+
 ### Telegram 命令同步说明
 
 Telegram 发来的普通文字和 Codex slash 命令都会写入屏幕里的 Codex CLI，所以它等价于你在终端里输入。

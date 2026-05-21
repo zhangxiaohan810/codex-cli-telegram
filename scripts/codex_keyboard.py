@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import fcntl
 import os
+import shutil
 import shlex
 import subprocess
 import sys
@@ -50,11 +51,39 @@ def main() -> int:
 
 
 def run_codex(args: list[str]) -> None:
-    codex_bin = os.environ.get("CODEX_BIN", "codex")
     env = load_env(".env")
+    codex_bin = resolve_codex_bin(env)
     ensure_watcher(env)
     print(f"[codex-keyboard] starting Codex CLI: {codex_bin}", flush=True)
     os.execvpe(codex_bin, [codex_bin, *args], env)
+
+
+def resolve_codex_bin(env: dict[str, str]) -> str:
+    configured = env.get("CODEX_BIN", "").strip()
+    if configured:
+        path = Path(configured).expanduser()
+        if path.is_file() and os.access(path, os.X_OK):
+            return str(path)
+        raise SystemExit(f"CODEX_BIN is set but not executable: {configured}")
+
+    candidates = []
+    script_dir = Path(sys.argv[0]).resolve().parent
+    candidates.append(script_dir / "codex")
+    for base in (Path.home() / ".local" / "bin", Path.home() / ".nvm" / "versions" / "node"):
+        if base.name == "node" and base.exists():
+            candidates.extend(base.glob("*/bin/codex"))
+        else:
+            candidates.append(base / "codex")
+
+    for candidate in candidates:
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return str(candidate)
+
+    resolved = shutil.which("codex", path=env.get("PATH"))
+    if resolved and Path(resolved).is_file() and os.access(resolved, os.X_OK):
+        return resolved
+
+    raise SystemExit("Could not find executable codex. Set CODEX_BIN=/full/path/to/codex in .env.")
 
 
 def ensure_watcher(env: dict[str, str]) -> None:
