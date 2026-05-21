@@ -3,29 +3,23 @@
 from __future__ import annotations
 
 import argparse
-import fcntl
 import os
 import shutil
 import shlex
+import socket
 import subprocess
 import sys
-import threading
 import time
 from pathlib import Path
+from urllib.parse import urlparse
 
+ROOT = Path(__file__).resolve().parents[1]
+LOGS_DIR = ROOT / ".logs"
 KEYBOARD_ACTIONS = {"start", "stop", "status", "test"}
-CODEX_LOG = Path.home() / ".codex" / "log" / "codex-tui.log"
-LOCK_FILE = Path.home() / ".codex" / "codex-keyboard-watch.lock"
-MIN_HOOK_INTERVAL_SECONDS = 0.8
-last_hook_at = 0.0
-hook_lock = threading.Lock()
 
 
 def main() -> int:
     raw_args = sys.argv[1:]
-    if raw_args[:1] == ["__watch"]:
-        return run_watcher()
-
     if not raw_args or raw_args[0] not in KEYBOARD_ACTIONS:
         run_codex(raw_args)
 
@@ -52,10 +46,38 @@ def main() -> int:
 
 def run_codex(args: list[str]) -> None:
     env = load_env(".env")
+    env["NOTIFICATION_CHANNEL"] = "keyboard"
+
     codex_bin = resolve_codex_bin(env)
-    ensure_watcher(env)
-    print(f"[codex-keyboard] starting Codex CLI: {codex_bin}", flush=True)
-    os.execvpe(codex_bin, [codex_bin, *args], env)
+    upstream_ws = env.get("CODEX_UPSTREAM_WS", "ws://127.0.0.1:8765")
+    bridge_host = env.get("BRIDGE_HOST", "127.0.0.1")
+    bridge_port = int(env.get("BRIDGE_PORT", "8766"))
+    bridge_url = f"ws://{bridge_host}:{bridge_port}"
+    upstream_host, upstream_port = ws_host_port(upstream_ws)
+    LOGS_DIR.mkdir(parents=True, exist_ok=True)
+
+    ensure_listening(
+        name="codex app-server",
+        host=upstream_host,
+        port=upstream_port,
+        command=codex_bin,
+        args=["app-server", "--listen", upstream_ws],
+        env=env,
+        log=LOGS_DIR / "codex-app-server.log",
+    )
+    ensure_listening(
+        name="codex keyboard bridge",
+        host=bridge_host,
+        port=bridge_port,
+        command=resolve_bridge_bin(env),
+        args=[],
+        env=env,
+        cwd=ROOT,
+        log=LOGS_DIR / "codex-telegram-bridge.log",
+    )
+
+    print(f"[codex-keyboard] starting Codex CLI: {codex_bin} --remote {bridge_url}", flush=True)
+    os.execvpe(codex_bin, [codex_bin, "--remote", bridge_url, *args], env)
 
 
 def resolve_codex_bin(env: dict[str, str]) -> str:
@@ -66,161 +88,118 @@ def resolve_codex_bin(env: dict[str, str]) -> str:
             return str(path)
         raise SystemExit(f"CODEX_BIN is set but not executable: {configured}")
 
-    candidates = []
+    return resolve_executable(
+        "codex",
+        env=env,
+        extra_candidates=[
+            Path.home() / ".local" / "bin" / "codex",
+            *sorted((Path.home() / ".nvm" / "versions" / "node").glob("*/bin/codex")),
+        ],
+        error="Could not find executable codex. Set CODEX_BIN=/full/path/to/codex in .env.",
+    )
+
+
+def resolve_bridge_bin(env: dict[str, str]) -> str:
+    configured = env.get("CODEX_TELEGRAM_BRIDGE_BIN", "").strip()
+    if configured:
+        path = Path(configured).expanduser()
+        if path.is_file() and os.access(path, os.X_OK):
+            return str(path)
+        resolved = shutil.which(configured, path=env.get("PATH"))
+        if resolved:
+            return resolved
+        raise SystemExit(f"CODEX_TELEGRAM_BRIDGE_BIN is set but not executable: {configured}")
+
+    return resolve_executable(
+        "codex-telegram-bridge",
+        env=env,
+        extra_candidates=[
+            ROOT / "bin" / "codex-telegram-bridge.js",
+            Path.home() / ".local" / "bin" / "codex-telegram-bridge",
+            *sorted((Path.home() / ".nvm" / "versions" / "node").glob("*/bin/codex-telegram-bridge")),
+        ],
+        error="Could not find executable codex-telegram-bridge.",
+    )
+
+
+def resolve_executable(
+    name: str,
+    *,
+    env: dict[str, str],
+    extra_candidates: list[Path],
+    error: str,
+) -> str:
     script_dir = Path(sys.argv[0]).resolve().parent
-    candidates.append(script_dir / "codex")
-    for base in (Path.home() / ".local" / "bin", Path.home() / ".nvm" / "versions" / "node"):
-        if base.name == "node" and base.exists():
-            candidates.extend(base.glob("*/bin/codex"))
-        else:
-            candidates.append(base / "codex")
+    candidates = [script_dir / name, *extra_candidates]
 
     for candidate in candidates:
         if candidate.is_file() and os.access(candidate, os.X_OK):
             return str(candidate)
 
-    resolved = shutil.which("codex", path=env.get("PATH"))
+    resolved = shutil.which(name, path=env.get("PATH"))
     if resolved and Path(resolved).is_file() and os.access(resolved, os.X_OK):
         return resolved
 
-    raise SystemExit("Could not find executable codex. Set CODEX_BIN=/full/path/to/codex in .env.")
+    raise SystemExit(error)
 
 
-def ensure_watcher(env: dict[str, str]) -> None:
-    command = [sys.executable, str(Path(__file__).resolve()), "__watch"]
+def ws_host_port(addr: str) -> tuple[str, int]:
+    parsed = urlparse(addr)
+    host = parsed.hostname or "127.0.0.1"
+    if parsed.port is not None:
+        return host, parsed.port
+    return host, 443 if parsed.scheme == "wss" else 80
+
+
+def ensure_listening(
+    *,
+    name: str,
+    host: str,
+    port: int,
+    command: str,
+    args: list[str],
+    env: dict[str, str],
+    log: Path,
+    cwd: Path | None = None,
+) -> None:
+    if can_connect(host, port):
+        print(f"[codex-keyboard] {name} already listening on {host}:{port}", flush=True)
+        return
+
+    print(f"[codex-keyboard] starting {name} on {host}:{port}", flush=True)
+    handle = log.open("ab", buffering=0)
     subprocess.Popen(
-        command,
+        [command, *args],
+        cwd=str(cwd or ROOT),
         env=env,
         stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        stdout=handle,
+        stderr=handle,
         start_new_session=True,
     )
 
+    deadline = time.monotonic() + 12
+    while time.monotonic() < deadline:
+        if can_connect(host, port):
+            print(f"[codex-keyboard] {name} ready; log: {log}", flush=True)
+            return
+        time.sleep(0.3)
 
-def run_watcher() -> int:
-    lock = try_acquire_lock()
-    if lock is None:
-        return 0
+    raise RuntimeError(f"{name} did not start on {host}:{port}. Check log: {log}")
 
-    env = load_env(".env")
-    stop_monitor = threading.Event()
+
+def can_connect(host: str, port: int) -> bool:
     try:
-        monitor_codex_log(env, stop_monitor)
-    finally:
-        stop_monitor.set()
-        run_action_quiet("stop", env)
-        release_lock(lock)
-    return 0
+        with socket.create_connection((host, port), timeout=0.7):
+            return True
+    except OSError:
+        return False
 
 
 def run_action(action: str, env: dict[str, str]) -> None:
     command = command_for(action, env)
     print(f"{action}: {describe_command(command)}", flush=True)
     subprocess.run(command, check=True, env=env, shell=isinstance(command, str))
-
-
-def run_action_quiet(action: str, env: dict[str, str]) -> None:
-    threading.Thread(target=run_action_background, args=(action, env), daemon=True).start()
-
-
-def run_action_background(action: str, env: dict[str, str]) -> None:
-    global last_hook_at
-    try:
-        with hook_lock:
-            now = time.monotonic()
-            wait_for = MIN_HOOK_INTERVAL_SECONDS - (now - last_hook_at)
-            if wait_for > 0:
-                time.sleep(wait_for)
-            last_hook_at = time.monotonic()
-        command = command_for(action, env)
-        subprocess.run(
-            command,
-            check=False,
-            env=env,
-            shell=isinstance(command, str),
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-    except Exception:
-        pass
-
-
-def try_acquire_lock():
-    LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
-    handle = open(LOCK_FILE, "a+")
-    try:
-        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        return handle
-    except BlockingIOError:
-        handle.close()
-        return None
-
-
-def release_lock(handle) -> None:
-    try:
-        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-    finally:
-        handle.close()
-
-
-def monitor_codex_log(env: dict[str, str], stop_monitor: threading.Event) -> None:
-    position = wait_for_log_position(stop_monitor)
-    pending_approvals = 0
-    last_event = 0.0
-
-    while not stop_monitor.is_set():
-        if not CODEX_LOG.exists():
-            time.sleep(0.2)
-            continue
-
-        with CODEX_LOG.open("r", errors="replace") as handle:
-            handle.seek(position)
-            while not stop_monitor.is_set():
-                line = handle.readline()
-                if not line:
-                    position = handle.tell()
-                    if pending_approvals > 0 and time.monotonic() - last_event > 120:
-                        run_action_quiet("stop", env)
-                        pending_approvals = 0
-                    time.sleep(0.2)
-                    continue
-
-                position = handle.tell()
-                if should_start_blink(line):
-                    pending_approvals += 1
-                    if pending_approvals == 1:
-                        run_action_quiet("start", env)
-                    last_event = time.monotonic()
-                elif pending_approvals > 0 and should_stop_blink(line):
-                    pending_approvals -= 1
-                    if pending_approvals == 0:
-                        run_action_quiet("stop", env)
-                    last_event = time.monotonic()
-
-
-def wait_for_log_position(stop_monitor: threading.Event) -> int:
-    while not stop_monitor.is_set():
-        if CODEX_LOG.exists():
-            return CODEX_LOG.stat().st_size
-        time.sleep(0.2)
-    return 0
-
-
-def should_start_blink(line: str) -> bool:
-    if "ToolCall: exec_command" in line and '"sandbox_permissions":"require_escalated"' in line:
-        return True
-    if "ToolCall: apply_patch" in line:
-        return True
-    return False
-
-
-def should_stop_blink(line: str) -> bool:
-    return (
-        'codex.op="exec_approval"' in line
-        or 'codex.op="patch_approval"' in line
-        or 'codex.op="interrupt"' in line
-    )
 
 
 def command_for(action: str, env: dict[str, str]) -> list[str] | str:
@@ -284,7 +263,7 @@ def resolve_env_path(env_file: str) -> Path:
     path = Path(env_file)
     if path.is_absolute() or env_file != ".env" or path.exists():
         return path
-    return Path(__file__).resolve().parents[1] / ".env"
+    return ROOT / ".env"
 
 
 if __name__ == "__main__":

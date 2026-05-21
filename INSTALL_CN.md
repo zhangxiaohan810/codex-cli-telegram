@@ -157,11 +157,11 @@ codex-telegram
 2. 启动 `codex-telegram-bridge`，默认地址是 `ws://127.0.0.1:8766`
 3. 通过 PTY driver 打开 `codex --remote ws://127.0.0.1:8766`
 
-只有 `.env` 里配置了 `TELEGRAM_BOT_TOKEN` 和 `TELEGRAM_CHAT_ID` 时，`codex-telegram` 才会启动 Telegram 通知；`codex-keyboard` 不启动 Telegram/app-server/bridge，只运行普通 Codex 并通过 SSH 发送键盘闪烁命令。
+只有 `.env` 里配置了 `TELEGRAM_BOT_TOKEN` 和 `TELEGRAM_CHAT_ID` 时，`codex-telegram` 才会启动 Telegram 通知。`codex-keyboard` 不启动 Telegram，但会启动本地 `codex app-server` 和 keyboard bridge，然后打开 `codex --remote`，这样键盘闪烁绑定的是 bridge 收到的真实 `requestApproval` 事件。
 
 启动成功后，你可以正常在 Codex CLI 里使用 Codex。Telegram bot 会收到 Codex 的输出和审批按钮。
 
-如果当前不需要 Telegram，只想在 Codex 审批时通过 SSH 让 Mac 上的 G610 闪烁，可以直接运行下面的入口。它不启动 Telegram/app-server/bridge，只启动普通 Codex 并发送 SSH 闪烁命令：
+如果当前不需要 Telegram，只想在 Codex 审批时通过 SSH 让 Mac 上的 G610 闪烁，可以直接运行下面的入口：
 
 ```bash
 codex-keyboard
