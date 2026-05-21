@@ -11,11 +11,11 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from urllib.parse import urlparse
 
 ROOT = Path(__file__).resolve().parents[1]
 LOGS_DIR = ROOT / ".logs"
 KEYBOARD_ACTIONS = {"start", "stop", "status", "test"}
+DEFAULT_HOST = "127.0.0.1"
 
 
 def main() -> int:
@@ -49,35 +49,49 @@ def run_codex(args: list[str]) -> None:
     env["NOTIFICATION_CHANNEL"] = "keyboard"
 
     codex_bin = resolve_codex_bin(env)
-    upstream_ws = env.get("CODEX_UPSTREAM_WS", "ws://127.0.0.1:8765")
-    bridge_host = env.get("BRIDGE_HOST", "127.0.0.1")
-    bridge_port = int(env.get("BRIDGE_PORT", "8766"))
-    bridge_url = f"ws://{bridge_host}:{bridge_port}"
-    upstream_host, upstream_port = ws_host_port(upstream_ws)
+    host = env.get("CODEX_KEYBOARD_HOST", env.get("BRIDGE_HOST", DEFAULT_HOST)).strip() or DEFAULT_HOST
+    upstream_guard, upstream_port = reserve_port(host)
+    bridge_guard, bridge_port = reserve_port(host)
+    upstream_ws = f"ws://{host}:{upstream_port}"
+    bridge_url = f"ws://{host}:{bridge_port}"
+
+    env["CODEX_UPSTREAM_WS"] = upstream_ws
+    env["BRIDGE_HOST"] = host
+    env["BRIDGE_PORT"] = str(bridge_port)
     LOGS_DIR.mkdir(parents=True, exist_ok=True)
 
+    upstream_guard.close()
     ensure_listening(
         name="codex app-server",
-        host=upstream_host,
+        host=host,
         port=upstream_port,
         command=codex_bin,
         args=["app-server", "--listen", upstream_ws],
         env=env,
-        log=LOGS_DIR / "codex-app-server.log",
+        log=LOGS_DIR / f"codex-app-server-{upstream_port}.log",
     )
+
+    bridge_guard.close()
     ensure_listening(
         name="codex keyboard bridge",
-        host=bridge_host,
+        host=host,
         port=bridge_port,
         command=resolve_bridge_bin(env),
         args=[],
         env=env,
         cwd=ROOT,
-        log=LOGS_DIR / "codex-telegram-bridge.log",
+        log=LOGS_DIR / f"codex-keyboard-bridge-{bridge_port}.log",
     )
 
     print(f"[codex-keyboard] starting Codex CLI: {codex_bin} --remote {bridge_url}", flush=True)
     os.execvpe(codex_bin, [codex_bin, "--remote", bridge_url, *args], env)
+
+
+def reserve_port(host: str) -> tuple[socket.socket, int]:
+    guard = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    guard.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    guard.bind((host, 0))
+    return guard, int(guard.getsockname()[1])
 
 
 def resolve_codex_bin(env: dict[str, str]) -> str:
@@ -143,14 +157,6 @@ def resolve_executable(
     raise SystemExit(error)
 
 
-def ws_host_port(addr: str) -> tuple[str, int]:
-    parsed = urlparse(addr)
-    host = parsed.hostname or "127.0.0.1"
-    if parsed.port is not None:
-        return host, parsed.port
-    return host, 443 if parsed.scheme == "wss" else 80
-
-
 def ensure_listening(
     *,
     name: str,
@@ -163,8 +169,7 @@ def ensure_listening(
     cwd: Path | None = None,
 ) -> None:
     if can_connect(host, port):
-        print(f"[codex-keyboard] {name} already listening on {host}:{port}", flush=True)
-        return
+        raise RuntimeError(f"{name} port unexpectedly became busy: {host}:{port}")
 
     print(f"[codex-keyboard] starting {name} on {host}:{port}", flush=True)
     handle = log.open("ab", buffering=0)
@@ -181,7 +186,7 @@ def ensure_listening(
     deadline = time.monotonic() + 12
     while time.monotonic() < deadline:
         if can_connect(host, port):
-            print(f"[codex-keyboard] {name} ready; log: {log}", flush=True)
+            print(f"[codex-keyboard] {name} ready on {host}:{port}; log: {log}", flush=True)
             return
         time.sleep(0.3)
 

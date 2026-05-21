@@ -157,7 +157,7 @@ codex-telegram
 2. 启动 `codex-telegram-bridge`，默认地址是 `ws://127.0.0.1:8766`
 3. 通过 PTY driver 打开 `codex --remote ws://127.0.0.1:8766`
 
-只有 `.env` 里配置了 `TELEGRAM_BOT_TOKEN` 和 `TELEGRAM_CHAT_ID` 时，`codex-telegram` 才会启动 Telegram 通知。`codex-keyboard` 不启动 Telegram，但会启动本地 `codex app-server` 和 keyboard bridge，然后打开 `codex --remote`，这样键盘闪烁绑定的是 bridge 收到的真实 `requestApproval` 事件。
+只有 `.env` 里配置了 `TELEGRAM_BOT_TOKEN` 和 `TELEGRAM_CHAT_ID` 时，`codex-telegram` 才会启动 Telegram 通知。`codex-keyboard` 不启动 Telegram，但会为当前窗口自动分配一组本地空闲端口来启动 `codex app-server` 和 keyboard bridge，然后打开 `codex --remote`，这样键盘闪烁绑定的是 bridge 收到的真实 `requestApproval` 事件。
 
 启动成功后，你可以正常在 Codex CLI 里使用 Codex。Telegram bot 会收到 Codex 的输出和审批按钮。
 

@@ -134,7 +134,7 @@ It asks whether the communication method is Telegram, keyboard light, or both. T
 
 Set `APPROVAL_REQUEST_START_CMD` to run a local command while any Codex approval request is pending. The bridge starts it when the first approval arrives and stops it when all pending approvals are resolved. `APPROVAL_REQUEST_STOP_CMD` is optional and runs after the start process is stopped.
 
-If you want keyboard approval notifications without Telegram, use the keyboard Codex entrypoint. It starts the local Codex app-server and bridge with `NOTIFICATION_CHANNEL=keyboard`, then opens `codex --remote`. Keyboard blinking is driven by the bridge's real `requestApproval` events, not by scraping `codex-tui.log`:
+If you want keyboard approval notifications without Telegram, use the keyboard Codex entrypoint. It starts a private local Codex app-server and bridge on free ports for that window with `NOTIFICATION_CHANNEL=keyboard`, then opens `codex --remote`. Keyboard blinking is driven by the bridge's real `requestApproval` events, not by scraping `codex-tui.log`:
 
 ```bash
 codex-keyboard
