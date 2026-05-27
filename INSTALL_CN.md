@@ -176,6 +176,39 @@ codex-keyboard start
 codex-keyboard stop
 ```
 
+### 推荐的 Mac 键盘反向转发方式
+
+Mac 控制键盘时，推荐让键盘命令监听器运行在 Mac 本地，再通过 SSH `RemoteForward` 暴露到每台服务器。这样服务器不需要知道 Mac 的局域网 IP。
+
+1. 在 Mac 本地启动端口命令监听器。可以直接运行 `~/bin/codex-g610-server-start`，也可以把它挂在你本地的 cc-switch 流程里，确保 Mac 本地 `127.0.0.1:19610` 可用。
+2. 在 Mac 端连接服务器的 SSH config 里加远程转发：
+
+```sshconfig
+Host tiezhujiqun
+    HostName 10.7.14.128
+    User Zhang810
+    RemoteForward 33456 127.0.0.1:8888
+    RemoteForward 19610 127.0.0.1:19610
+    LocalForward 1455 127.0.0.1:1455
+```
+
+`19610` 可以换成任何你想要的服务器端空闲端口；右侧保持为 Mac 本地监听器端口，通常是 `127.0.0.1:19610`。
+
+3. 服务器端 `.env` 里把审批 hook 指向本地反向转发端口：
+
+```bash
+APPROVAL_REQUEST_START_CMD="printf start | nc 127.0.0.1 19610"
+APPROVAL_REQUEST_STOP_CMD="printf stop | nc 127.0.0.1 19610"
+APPROVAL_REQUEST_STATUS_CMD="printf status | nc 127.0.0.1 19610"
+```
+
+服务器上验证：
+
+```bash
+printf status | nc 127.0.0.1 19610
+codex-keyboard status
+```
+
 如果 `codex-keyboard` 找不到 Codex，或者误用 `/snap/bin/codex` 这类旧路径，在 `.env` 里显式指定：
 
 ```bash

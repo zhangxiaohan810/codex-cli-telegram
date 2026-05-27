@@ -149,6 +149,39 @@ codex-keyboard start
 codex-keyboard stop
 ```
 
+### Recommended Mac Keyboard Forwarding
+
+For a Mac-controlled keyboard, the most stable setup is to keep the keyboard listener local to the Mac and expose it to each server through SSH `RemoteForward`. This avoids depending on the Mac's changing LAN IP.
+
+1. On the Mac, run the local port command listener. You can start it directly with `~/bin/codex-g610-server-start`, or use your local cc-switch workflow as the carrier that keeps the listener available on `127.0.0.1:19610`.
+2. In the Mac-side SSH configuration for each server, add a remote forward:
+
+```sshconfig
+Host tiezhujiqun
+    HostName 10.7.14.128
+    User Zhang810
+    RemoteForward 33456 127.0.0.1:8888
+    RemoteForward 19610 127.0.0.1:19610
+    LocalForward 1455 127.0.0.1:1455
+```
+
+`19610` can be replaced by any free server-side port. The right side should remain the Mac-local listener port, normally `127.0.0.1:19610`.
+
+3. On the server, point the approval hooks at the forwarded local port:
+
+```bash
+APPROVAL_REQUEST_START_CMD="printf start | nc 127.0.0.1 19610"
+APPROVAL_REQUEST_STOP_CMD="printf stop | nc 127.0.0.1 19610"
+APPROVAL_REQUEST_STATUS_CMD="printf status | nc 127.0.0.1 19610"
+```
+
+Then verify from the server:
+
+```bash
+printf status | nc 127.0.0.1 19610
+codex-keyboard status
+```
+
 If `codex-keyboard` cannot find Codex or finds a stale system path such as `/snap/bin/codex`, set the explicit CLI path in `.env`:
 
 ```bash

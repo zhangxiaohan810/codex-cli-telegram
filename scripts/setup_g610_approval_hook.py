@@ -25,6 +25,7 @@ ENV_KEYS = {
     "MAC_G610_SERVER_PORT",
     "APPROVAL_REQUEST_START_CMD",
     "APPROVAL_REQUEST_STOP_CMD",
+    "APPROVAL_REQUEST_STATUS_CMD",
 }
 
 
@@ -307,6 +308,7 @@ def install_local_macos(env_file: Path, mac_python: str, port: int) -> tuple[str
             "G610_LOCAL_SERVER_PORT": str(port),
             "APPROVAL_REQUEST_START_CMD": f"\"{start_cmd}\"",
             "APPROVAL_REQUEST_STOP_CMD": f"\"{stop_cmd}\"",
+            "APPROVAL_REQUEST_STATUS_CMD": f"\"printf status | nc 127.0.0.1 {port}\"",
         },
     )
     print(f"Updated {env_file}")
@@ -336,6 +338,7 @@ def install_ssh_macos(env_file: Path, mac_host: str, mac_user: str, mac_python: 
 
     start_cmd = f"ssh -o BatchMode=yes -o ConnectTimeout=5 {mac_user}@{mac_host} 'printf start | nc 127.0.0.1 {port}'"
     stop_cmd = f"ssh -o BatchMode=yes -o ConnectTimeout=5 {mac_user}@{mac_host} 'printf stop | nc 127.0.0.1 {port}'"
+    status_cmd = f"ssh -o BatchMode=yes -o ConnectTimeout=5 {mac_user}@{mac_host} 'printf status | nc 127.0.0.1 {port}'"
     update_env(
         env_file,
         {
@@ -346,6 +349,7 @@ def install_ssh_macos(env_file: Path, mac_host: str, mac_user: str, mac_python: 
             "MAC_G610_SERVER_PORT": str(port),
             "APPROVAL_REQUEST_START_CMD": f"\"{start_cmd}\"",
             "APPROVAL_REQUEST_STOP_CMD": f"\"{stop_cmd}\"",
+            "APPROVAL_REQUEST_STATUS_CMD": f"\"{status_cmd}\"",
         },
     )
 
