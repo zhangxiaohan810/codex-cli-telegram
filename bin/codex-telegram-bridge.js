@@ -1597,23 +1597,60 @@ function sendUpstream(upstream, text) {
 }
 
 function closePair(client, upstream) {
-  for (const [key, record] of pendingApprovals.entries()) {
-    if (record.client === client) pendingApprovals.delete(key);
+  const wasActiveClient = activeClient === client;
+  const removedApprovals = clearPendingApprovalsForClient(client);
+  if (removedApprovals.length) {
+    console.log(
+      `[bridge] cleared ${removedApprovals.length} pending approvals for client id=${client.id} requests=${formatApprovalRecordList(removedApprovals)}`,
+    );
   }
-  syncApprovalHook();
 
   if (client.open) client.socket.end();
   try {
     if (upstream.readyState === WebSocket.OPEN || upstream.readyState === WebSocket.CONNECTING) upstream.close();
   } catch {}
   upstreamByClient.delete(client);
-  if (activeClient === client) {
+  if (wasActiveClient) {
     console.log(`[bridge] active client disconnected id=${client.id}`);
+    if (NOTIFICATION_CHANNEL === "keyboard") {
+      const abandonedApprovals = clearAllPendingApprovals();
+      if (abandonedApprovals.length) {
+        console.log(
+          `[bridge] cleared ${abandonedApprovals.length} remaining pending approvals on keyboard session exit requests=${formatApprovalRecordList(abandonedApprovals)}`,
+        );
+      }
+      console.log(`[bridge] forcing approval stop on keyboard session exit id=${client.id}`);
+      stopApprovalHook();
+    } else {
+      syncApprovalHook();
+    }
     activeClient = null;
     activeThreadId = null;
     activeTurnId = null;
     activeCwd = null;
+  } else {
+    syncApprovalHook();
   }
+}
+
+function clearPendingApprovalsForClient(client) {
+  const removed = [];
+  for (const [key, record] of pendingApprovals.entries()) {
+    if (record.client !== client) continue;
+    pendingApprovals.delete(key);
+    removed.push(record);
+  }
+  return removed;
+}
+
+function clearAllPendingApprovals() {
+  const removed = [...pendingApprovals.values()];
+  pendingApprovals.clear();
+  return removed;
+}
+
+function formatApprovalRecordList(records) {
+  return records.map((record) => `${record.method}:${record.requestId}`).join(",");
 }
 
 function encodeFrame(payload, masked, opcode = 0x1) {
