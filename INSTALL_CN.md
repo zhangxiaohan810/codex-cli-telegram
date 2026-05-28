@@ -180,7 +180,7 @@ codex-keyboard stop
 
 Mac 控制键盘时，推荐让键盘命令监听器运行在 Mac 本地，再通过 SSH `RemoteForward` 暴露到每台服务器。这样服务器不需要知道 Mac 的局域网 IP。
 
-1. 在 Mac 本地启动端口命令监听器。可以直接运行 `~/bin/codex-g610-server-start`，也可以把它挂在你本地的 cc-switch 流程里，确保 Mac 本地 `127.0.0.1:19610` 可用。
+1. 在 Mac 本地启动端口命令监听器。可以直接运行 `~/bin/codex-g610-server-start`，也可以使用 [Local Keyboard Notifier](https://github.com/zhangxiaohan810/claude-codex-keyboard-notifier)，确保 Mac 本地 `127.0.0.1:19610` 可用。
 2. 在 Mac 端连接服务器的 SSH config 里加远程转发：
 
 ```sshconfig

@@ -153,7 +153,7 @@ codex-keyboard stop
 
 For a Mac-controlled keyboard, the most stable setup is to keep the keyboard listener local to the Mac and expose it to each server through SSH `RemoteForward`. This avoids depending on the Mac's changing LAN IP.
 
-1. On the Mac, run the local port command listener. You can start it directly with `~/bin/codex-g610-server-start`, or use your local cc-switch workflow as the carrier that keeps the listener available on `127.0.0.1:19610`.
+1. On the Mac, run the local port command listener. You can start it directly with `~/bin/codex-g610-server-start`, or use [Local Keyboard Notifier](https://github.com/zhangxiaohan810/claude-codex-keyboard-notifier) to keep the listener available on `127.0.0.1:19610`.
 2. In the Mac-side SSH configuration for each server, add a remote forward:
 
 ```sshconfig
