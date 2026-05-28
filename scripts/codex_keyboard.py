@@ -16,6 +16,7 @@ ROOT = Path(__file__).resolve().parents[1]
 LOGS_DIR = ROOT / ".logs"
 KEYBOARD_ACTIONS = {"start", "stop", "status", "test"}
 DEFAULT_HOST = "127.0.0.1"
+DEFAULT_LOCAL_G610_PORT = "19610"
 
 
 def main() -> int:
@@ -30,6 +31,7 @@ def main() -> int:
     args = parser.parse_args(raw_args)
 
     env = load_env(args.env_file)
+    ensure_default_local_commands(env)
 
     if args.action == "test":
         try:
@@ -46,6 +48,7 @@ def main() -> int:
 
 def run_codex(args: list[str]) -> None:
     env = load_env(".env")
+    ensure_default_local_commands(env)
     env["NOTIFICATION_CHANNEL"] = "keyboard"
 
     codex_bin = resolve_codex_bin(env)
@@ -85,6 +88,17 @@ def run_codex(args: list[str]) -> None:
 
     print(f"[codex-keyboard] starting Codex CLI: {codex_bin} --remote {bridge_url}", flush=True)
     os.execvpe(codex_bin, [codex_bin, "--remote", bridge_url, *args], env)
+
+
+def ensure_default_local_commands(env: dict[str, str]) -> None:
+    if env.get("APPROVAL_REQUEST_START_CMD", "").strip():
+        return
+
+    port = env.get("MAC_G610_SERVER_PORT", DEFAULT_LOCAL_G610_PORT).strip() or DEFAULT_LOCAL_G610_PORT
+    env["MAC_G610_SERVER_PORT"] = port
+    env.setdefault("APPROVAL_REQUEST_START_CMD", f"printf start | nc 127.0.0.1 {port}")
+    env.setdefault("APPROVAL_REQUEST_STOP_CMD", f"printf stop | nc 127.0.0.1 {port}")
+    env.setdefault("APPROVAL_REQUEST_STATUS_CMD", f"printf status | nc 127.0.0.1 {port}")
 
 
 def reserve_port(host: str) -> tuple[socket.socket, int]:
