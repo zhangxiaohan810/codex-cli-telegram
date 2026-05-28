@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 from pathlib import Path
 
 
@@ -22,7 +23,7 @@ KEYS = {
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("mac_host", nargs="?", help="Mac IP, hostname, or Tailscale/MagicDNS name")
-    parser.add_argument("--user", default="Tiezhu", help="Mac SSH user")
+    parser.add_argument("--user", default=os.environ.get("USER", "macuser"), help="Mac SSH user")
     parser.add_argument("--port", type=int, default=19610, help="Mac-local G610 server port")
     parser.add_argument("--remote-forward", action="store_true", help="Use an SSH RemoteForward exposed on this server instead of SSHing to the Mac")
     parser.add_argument("--env-file", default=".env")

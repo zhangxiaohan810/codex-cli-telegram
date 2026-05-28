@@ -384,7 +384,7 @@ def default_mac_python() -> str:
         candidate = Path.home() / "miniforge3" / "bin" / "python"
         if candidate.exists():
             return str(candidate)
-    return "/Users/Tiezhu/miniforge3/bin/python"
+    return "/Users/your_mac_user/miniforge3/bin/python"
 
 
 def default_mac_install_dir(mac_user: str) -> str:
@@ -427,7 +427,7 @@ def main() -> int:
         return 0
 
     mac_host = args.mac_host or existing.get("MAC_HOST") or ask_text("Mac host/IP")
-    mac_user = args.mac_user or existing.get("MAC_SSH_USER") or ask_text("Mac SSH user", os.environ.get("USER", "Tiezhu"))
+    mac_user = args.mac_user or existing.get("MAC_SSH_USER") or ask_text("Mac SSH user", os.environ.get("USER", "macuser"))
     mac_dir = args.mac_dir or ask_text("Install directory on Mac", default_mac_install_dir(mac_user))
     start_cmd, stop_cmd = install_ssh_macos(env_file, mac_host, mac_user, mac_python, mac_dir, args.port)
     if args.input_mapping == "yes" or (args.input_mapping == "ask" and ask_yes_no("Install optional Mac keyboard/mouse mapping templates on the Mac?", False)):

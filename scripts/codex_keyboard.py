@@ -228,7 +228,7 @@ def command_for(action: str, env: dict[str, str]) -> list[str] | str:
         return expand_env_vars(configured, env)
 
     host = env.get("MAC_HOST", "").strip()
-    user = env.get("MAC_SSH_USER", "Tiezhu").strip()
+    user = env.get("MAC_SSH_USER", os.environ.get("USER", "macuser")).strip()
     port = env.get("MAC_G610_SERVER_PORT", "19610").strip()
     ssh_key = env.get("MAC_SSH_KEY", "").strip()
 

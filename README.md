@@ -158,8 +158,8 @@ For a Mac-controlled keyboard, the most stable setup is to keep the keyboard lis
 
 ```sshconfig
 Host Server
-    HostName 10.7.xx.xxx
-    User xxxxxx
+    HostName server.example.com
+    User your_server_user
     RemoteForward 19610 127.0.0.1:19610
 ```
 
@@ -199,8 +199,8 @@ On macOS it also asks whether to install an optional local keyboard/mouse mapper
 For the verified server-to-Mac setup:
 
 ```bash
-python scripts/setup_g610_approval_hook.py --mode ssh --local-os mac --mac-host 10.7.166.81 --mac-user Tiezhu
-ssh-copy-id Tiezhu@10.7.166.81
+python scripts/setup_g610_approval_hook.py --mode ssh --local-os mac --mac-host your-mac-hostname-or-ip --mac-user your_mac_user
+ssh-copy-id your_mac_user@your-mac-hostname-or-ip
 ```
 
 Then start the Mac-side controller from a local Mac Terminal with `~/bin/codex-g610-server-start`, and test from the bridge machine with `codex-g610-test 5`.

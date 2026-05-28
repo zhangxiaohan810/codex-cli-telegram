@@ -7,8 +7,8 @@ Run this on the Mac that owns the keyboard, from a local Terminal session:
 
 Then remote machines can trigger it over SSH without opening HID themselves:
 
-    ssh Tiezhu@mac 'printf start | nc 127.0.0.1 19610'
-    ssh Tiezhu@mac 'printf stop | nc 127.0.0.1 19610'
+    ssh your_mac_user@mac 'printf start | nc 127.0.0.1 19610'
+    ssh your_mac_user@mac 'printf stop | nc 127.0.0.1 19610'
 """
 
 from __future__ import annotations

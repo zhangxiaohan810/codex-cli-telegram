@@ -184,12 +184,10 @@ Mac 控制键盘时，推荐让键盘命令监听器运行在 Mac 本地，再�
 2. 在 Mac 端连接服务器的 SSH config 里加远程转发：
 
 ```sshconfig
-Host tiezhujiqun
-    HostName 10.7.14.128
-    User Zhang810
-    RemoteForward 33456 127.0.0.1:8888
+Host Server
+    HostName server.example.com
+    User your_server_user
     RemoteForward 19610 127.0.0.1:19610
-    LocalForward 1455 127.0.0.1:1455
 ```
 
 `19610` 可以换成任何你想要的服务器端空闲端口；右侧保持为 Mac 本地监听器端口，通常是 `127.0.0.1:19610`。
