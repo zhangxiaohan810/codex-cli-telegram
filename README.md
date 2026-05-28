@@ -157,12 +157,10 @@ For a Mac-controlled keyboard, the most stable setup is to keep the keyboard lis
 2. In the Mac-side SSH configuration for each server, add a remote forward:
 
 ```sshconfig
-Host tiezhujiqun
-    HostName 10.7.14.128
-    User Zhang810
-    RemoteForward 33456 127.0.0.1:8888
+Host Server
+    HostName 10.7.xx.xxx
+    User xxxxxx
     RemoteForward 19610 127.0.0.1:19610
-    LocalForward 1455 127.0.0.1:1455
 ```
 
 `19610` can be replaced by any free server-side port. The right side should remain the Mac-local listener port, normally `127.0.0.1:19610`.
